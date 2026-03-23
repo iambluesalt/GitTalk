@@ -1,0 +1,30 @@
+# GitTalk Backend Dependencies
+# Phase 3: Code Parsing & Indexing
+
+# Web framework
+fastapi>=0.116.0
+uvicorn>=0.30.0
+pydantic>=2.11.0
+pydantic-settings>=2.10.0
+
+# HTTP client
+httpx>=0.28.0
+httpx-sse>=0.4.0
+
+# Environment
+python-dotenv>=1.0.0
+
+# Vector database
+lancedb>=0.29.0
+pyarrow>=23.0.0
+
+# Tree-sitter parsing
+tree-sitter>=0.25.0
+tree-sitter-python>=0.25.0
+tree-sitter-javascript>=0.25.0
+tree-sitter-typescript>=0.23.0
+tree-sitter-go>=0.25.0
+tree-sitter-java>=0.23.0
+tree-sitter-rust>=0.24.0
+tree-sitter-c>=0.24.0
+tree-sitter-cpp>=0.23.0

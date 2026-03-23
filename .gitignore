@@ -1,0 +1,40 @@
+.DS_Store
+.env
+/node_modules/
+
+# React Router
+/.react-router/
+/build/
+
+.claude
+venv
+chroma_langchain_db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+
+# GitTalk Backend
+/data/
+/cloned_repos/
+*.db
+*.db-journal
+*.log
+
+# LanceDB
+*.lance/
+lancedb/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
