@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   RefreshCw,
   Brain,
@@ -24,6 +25,8 @@ import {
   CheckCircle2,
   XCircle,
   ChevronDown,
+  Info,
+  X,
 } from "lucide-react";
 import type { Route } from "./+types/settings";
 import type { HealthResponse, AppConfig, ConfigUpdate } from "~/lib/types";
@@ -55,6 +58,8 @@ interface FormData {
   max_search_results: number;
   chunk_max_tokens: number;
   retrieval_candidates: number;
+  min_relevance_score: number;
+  chunk_overlap_lines: number;
   embedding_dimensions: number;
   embedding_batch_size: number;
   indexing_workers: number;
@@ -80,6 +85,8 @@ function configToForm(c: AppConfig): FormData {
     max_search_results: c.max_search_results,
     chunk_max_tokens: c.chunk_max_tokens,
     retrieval_candidates: c.retrieval_candidates,
+    min_relevance_score: c.min_relevance_score,
+    chunk_overlap_lines: c.chunk_overlap_lines,
     embedding_dimensions: c.embedding_dimensions,
     embedding_batch_size: c.embedding_batch_size,
     indexing_workers: c.indexing_workers,
@@ -510,7 +517,7 @@ export default function SettingsPage() {
             </h2>
             <div className="rounded-xl border border-border-subtle bg-surface overflow-hidden">
               {/* Provider */}
-              <FormRow label="Provider Mode" icon={Cpu}>
+              <FormRow label="Provider Mode" icon={Cpu} hint="Hybrid uses cloud (fast) with local Ollama fallback. Cloud-only for minimum latency.">
                 <div className="relative">
                   <select
                     value={form.llm_provider}
@@ -542,7 +549,7 @@ export default function SettingsPage() {
               </FormRow>
 
               {/* Chat Model */}
-              <FormRow label="Chat Model" icon={Brain}>
+              <FormRow label="Chat Model" icon={Brain} hint="Local Ollama model for code Q&A. Used as fallback in hybrid mode.">
                 <input
                   type="text"
                   value={form.ollama_model}
@@ -553,7 +560,7 @@ export default function SettingsPage() {
               </FormRow>
 
               {/* Embed Model */}
-              <FormRow label="Embed Model" icon={Layers}>
+              <FormRow label="Embed Model" icon={Layers} hint="Must match the model used during indexing. Changing requires re-index.">
                 <input
                   type="text"
                   value={form.ollama_embed_model}
@@ -564,7 +571,7 @@ export default function SettingsPage() {
               </FormRow>
 
               {/* Ollama Timeout */}
-              <FormRow label="Ollama Timeout" icon={Timer}>
+              <FormRow label="Ollama Timeout" icon={Timer} hint="Low: 30s (fast models) · Med: 120s · High: 300s (large models)">
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -615,7 +622,7 @@ export default function SettingsPage() {
               </FormRow>
 
               {/* Cloud Model */}
-              <FormRow label="Cloud Model" icon={Brain}>
+              <FormRow label="Cloud Model" icon={Brain} hint="e.g. gemini-2.5-flash (fastest), gemini-2.0-flash, gpt-4o-mini">
                 <input
                   type="text"
                   value={form.cloud_model}
@@ -651,7 +658,7 @@ export default function SettingsPage() {
             </h2>
             <div className="rounded-xl border border-border-subtle bg-surface overflow-hidden">
               {/* Context Window */}
-              <FormRow label="Context Window" icon={Layers}>
+              <FormRow label="Context Window" icon={Layers} hint="Low: 4096 · Med: 16384 · High: 32768+ — larger = more code context per query">
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -672,7 +679,7 @@ export default function SettingsPage() {
               </FormRow>
 
               {/* Search Results */}
-              <FormRow label="Search Results" icon={Search}>
+              <FormRow label="Search Results" icon={Search} hint="Top: Low 3 (focused) · Med 8 · High 15 (broad). Candidates: Low 10 · Med 30 · High 100 (re-ranking pool)">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-text-ghost">Top</span>
                   <input
@@ -706,8 +713,29 @@ export default function SettingsPage() {
                 </div>
               </FormRow>
 
+              {/* Min Relevance Score */}
+              <FormRow label="Min Relevance" icon={Search} hint="Low: 0.05 (permissive) · Med: 0.15 (balanced) · High: 0.35 (strict) — filters weak matches from results">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    value={form.min_relevance_score}
+                    onChange={(e) =>
+                      set(
+                        "min_relevance_score",
+                        parseFloat(e.target.value) || 0
+                      )
+                    }
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    className={cn(inputCls, "w-24 font-mono text-xs")}
+                  />
+                  <span className="text-xs text-text-ghost">threshold (0–1)</span>
+                </div>
+              </FormRow>
+
               {/* Chunk Size */}
-              <FormRow label="Chunk Size" icon={HardDrive}>
+              <FormRow label="Chunk Size" icon={HardDrive} hint="Low: 300 (precise) · Med: 800 (balanced) · High: 2000 (full functions) — tokens per code chunk">
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -724,8 +752,28 @@ export default function SettingsPage() {
                 </div>
               </FormRow>
 
+              {/* Chunk Overlap */}
+              <FormRow label="Chunk Overlap" icon={Layers} hint="Low: 0 · Med: 3 · High: 8 — lines shared between split chunks to preserve context at boundaries">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    value={form.chunk_overlap_lines}
+                    onChange={(e) =>
+                      set(
+                        "chunk_overlap_lines",
+                        parseInt(e.target.value) || 0
+                      )
+                    }
+                    min={0}
+                    max={20}
+                    className={cn(inputCls, "w-20 font-mono text-xs")}
+                  />
+                  <span className="text-xs text-text-ghost">lines</span>
+                </div>
+              </FormRow>
+
               {/* Embedding Dimensions */}
-              <FormRow label="Embed Dims" icon={Cpu}>
+              <FormRow label="Embed Dims" icon={Cpu} hint="768 for nomic-embed-text, 1536 for text-embedding-3-large. Must match model output. Batch: Low 16 · Med 64 · High 256">
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -758,7 +806,7 @@ export default function SettingsPage() {
               </FormRow>
 
               {/* Max Repo Size */}
-              <FormRow label="Max Repo Size" icon={GitBranch}>
+              <FormRow label="Max Repo Size" icon={GitBranch} hint="Low: 50MB · Med: 200MB · High: 1000MB — maximum allowed clone size">
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -775,7 +823,7 @@ export default function SettingsPage() {
               </FormRow>
 
               {/* Indexing Workers */}
-              <FormRow label="Indexing Workers" icon={Server} last>
+              <FormRow label="Indexing Workers" icon={Server} last hint="Low: 1 (less CPU) · Med: 4 (balanced) · High: 8+ (faster indexing, CPU intensive)">
                 <input
                   type="number"
                   value={form.indexing_workers}
@@ -892,11 +940,13 @@ function FormRow({
   label,
   icon: Icon,
   children,
+  hint,
   last,
 }: {
   label: string;
   icon: typeof Server;
   children: React.ReactNode;
+  hint?: string;
   last?: boolean;
 }) {
   return (
@@ -907,9 +957,138 @@ function FormRow({
       )}
     >
       <Icon className="w-3.5 h-3.5 text-text-ghost shrink-0" />
-      <span className="text-xs text-text-muted w-32 shrink-0">{label}</span>
+      <span className="text-xs text-text-muted w-32 shrink-0 flex items-center gap-1.5">
+        {label}
+        {hint && <InfoTip text={hint} />}
+      </span>
       <div className="flex-1 min-w-0">{children}</div>
     </div>
+  );
+}
+
+function InfoTip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0, above: false });
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+
+  // Close on click outside
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (
+        btnRef.current?.contains(e.target as Node) ||
+        popRef.current?.contains(e.target as Node)
+      )
+        return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  // Reposition on scroll/resize so popover tracks the icon
+  useEffect(() => {
+    if (!open || !btnRef.current) return;
+    const reposition = () => {
+      if (!btnRef.current) return;
+      const rect = btnRef.current.getBoundingClientRect();
+      const above = window.innerHeight - rect.bottom < 120;
+      setPos({
+        left: rect.left,
+        top: above ? rect.top - 10 : rect.bottom + 10,
+        above,
+      });
+    };
+    const scroller = btnRef.current.closest(".overflow-y-auto") || window;
+    scroller.addEventListener("scroll", reposition, { passive: true });
+    window.addEventListener("resize", reposition, { passive: true });
+    return () => {
+      scroller.removeEventListener("scroll", reposition);
+      window.removeEventListener("resize", reposition);
+    };
+  }, [open]);
+
+  const handleToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!open && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      const above = window.innerHeight - rect.bottom < 120;
+      setPos({
+        left: rect.left,
+        top: above ? rect.top - 10 : rect.bottom + 10,
+        above,
+      });
+    }
+    setOpen((v) => !v);
+  };
+
+  // Split on " — " to separate range values from description
+  const sep = text.indexOf(" — ");
+  const ranges = sep !== -1 ? text.slice(0, sep) : text;
+  const description = sep !== -1 ? text.slice(sep + 3) : null;
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={handleToggle}
+        className={cn(
+          "rounded-full transition-colors inline-flex",
+          open
+            ? "text-accent"
+            : "text-text-ghost/40 hover:text-accent/70"
+        )}
+      >
+        <Info className="w-3 h-3" />
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={popRef}
+            style={{
+              position: "fixed",
+              top: pos.above ? undefined : pos.top,
+              bottom: pos.above
+                ? window.innerHeight - pos.top
+                : undefined,
+              left: pos.left,
+            }}
+            className="z-[9999] w-64 max-w-[calc(100vw-2rem)] rounded-xl border border-border-default bg-elevated shadow-xl animate-fade-in"
+          >
+            {/* Arrow */}
+            <div
+              className={cn(
+                "absolute left-3 w-3 h-3 rotate-45 border-border-default bg-elevated",
+                pos.above
+                  ? "-bottom-1.5 border-r border-b"
+                  : "-top-1.5 border-l border-t"
+              )}
+            />
+            <div className="relative p-3 space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[11px] font-medium text-text-primary leading-snug">
+                  {ranges}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  className="text-text-ghost hover:text-text-secondary transition-colors shrink-0 mt-px"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+              {description && (
+                <p className="text-[10px] text-text-muted leading-relaxed">
+                  {description}
+                </p>
+              )}
+            </div>
+          </div>,
+          document.body
+        )}
+    </>
   );
 }
 

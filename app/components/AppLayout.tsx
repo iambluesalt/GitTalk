@@ -7,6 +7,7 @@ import {
   PanelLeftOpen,
   PanelLeftClose,
   Settings,
+  BookOpen,
   CircleCheck,
   CircleX,
   Server,
@@ -136,6 +137,22 @@ export default function AppLayout() {
               <span>{label}</span>
             </NavLink>
           ))}
+
+          {/* Guide nav */}
+          <NavLink
+            to="/guide"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 whitespace-nowrap",
+                isActive
+                  ? "bg-accent/10 text-accent shadow-[inset_0_0_0_1px_rgba(0,212,255,0.15)]"
+                  : "text-text-secondary hover:text-text-primary hover:bg-hover"
+              )
+            }
+          >
+            <BookOpen className="w-4.5 h-4.5 shrink-0" />
+            <span>Guide</span>
+          </NavLink>
 
           {/* Settings nav */}
           <NavLink

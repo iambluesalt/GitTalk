@@ -71,12 +71,16 @@ class CodeChunker:
         # Track which lines are covered by functions/classes
         covered_lines: set[int] = set()
 
+        # Track classes chunked as a whole (methods already included)
+        fully_chunked_classes: set[str] = set()
+
         # Process classes (full class as one chunk)
         for cls in classes:
             cls_text = cls.text.decode("utf-8", errors="replace")
             token_est = len(cls_text) // 4
 
             if token_est <= self.max_tokens:
+                fully_chunked_classes.add(cls.name)
                 chunks.append(self._make_chunk(
                     text=cls_text,
                     file_path=file_path,
@@ -119,6 +123,10 @@ class CodeChunker:
 
         # Process functions and methods
         for fn in functions:
+            # Skip methods already included in a fully-chunked class
+            if fn.class_name and fn.class_name in fully_chunked_classes:
+                continue
+
             fn_text = fn.text.decode("utf-8", errors="replace")
             token_est = len(fn_text) // 4
 
@@ -182,8 +190,17 @@ class CodeChunker:
             return
 
         token_est = len(text) // 4
-        if token_est < 5:
-            return  # Skip trivial chunks
+        if token_est < 15:
+            return  # Skip trivially short chunks
+
+        # Skip chunks that are purely imports/requires (no meaningful code)
+        non_empty = [l.strip() for _, l in lines if l.strip() and not l.strip().startswith("#") and not l.strip().startswith("//")]
+        if non_empty and all(
+            l.startswith(("import ", "from ", "require(", "const {", "export {"))
+            or l.startswith(("using ", "#include", "package "))
+            for l in non_empty
+        ):
+            return  # Pure import block — not useful for retrieval
 
         line_start = lines[0][0]
         line_end = lines[-1][0]
@@ -232,11 +249,13 @@ class CodeChunker:
         base_line: int,
         chunk_type: str,
     ) -> list[CodeChunk]:
-        """Split text into chunks that fit within token limits, splitting at line boundaries."""
+        """Split text into chunks that fit within token limits, splitting at line boundaries.
+        Carries forward overlap lines between chunks to preserve context at boundaries."""
         lines = text.split("\n")
         chunks = []
         current_lines: list[str] = []
         current_start = base_line
+        overlap = settings.CHUNK_OVERLAP_LINES
 
         for i, line in enumerate(lines):
             current_lines.append(line)
@@ -245,7 +264,8 @@ class CodeChunker:
 
             if token_est >= self.max_tokens and len(current_lines) > 1:
                 # Emit chunk without the last line
-                chunk_text = "\n".join(current_lines[:-1])
+                emit_lines = current_lines[:-1]
+                chunk_text = "\n".join(emit_lines)
                 if chunk_text.strip():
                     chunks.append(self._make_chunk(
                         text=chunk_text,
@@ -254,11 +274,13 @@ class CodeChunker:
                         function_name=function_name,
                         class_name=class_name,
                         line_start=current_start,
-                        line_end=current_start + len(current_lines) - 2,
+                        line_end=current_start + len(emit_lines) - 1,
                         chunk_type=chunk_type,
                     ))
-                current_lines = [line]
-                current_start = base_line + i
+                # Carry forward overlap lines from end of emitted chunk
+                carry = emit_lines[-overlap:] if overlap > 0 else []
+                current_lines = carry + [line]
+                current_start = base_line + i - len(carry)
 
         # Flush remaining
         if current_lines:
@@ -363,10 +385,13 @@ class CodeChunker:
         line_end: int,
         chunk_type: str,
     ) -> CodeChunk:
-        """Create a CodeChunk with a unique ID."""
+        """Create a CodeChunk with a unique ID and contextual header."""
+        contextualized = self._add_context_header(
+            text, file_path, language, function_name, class_name, chunk_type
+        )
         return CodeChunk(
             id=str(uuid.uuid4()),
-            text=text,
+            text=contextualized,
             file_path=file_path,
             language=language,
             function_name=function_name,
@@ -374,8 +399,38 @@ class CodeChunker:
             line_start=line_start,
             line_end=line_end,
             chunk_type=chunk_type,
-            token_estimate=len(text) // 4,
+            token_estimate=len(contextualized) // 4,
         )
+
+    def _add_context_header(
+        self,
+        text: str,
+        file_path: str,
+        language: str,
+        function_name: str | None,
+        class_name: str | None,
+        chunk_type: str,
+    ) -> str:
+        """
+        Prepend a short metadata header to chunk text before embedding.
+
+        This dramatically improves retrieval quality because the embedding model
+        can associate code with its file path, function/class name, and role.
+        """
+        parts = [f"# File: {file_path}"]
+        if class_name and function_name:
+            parts.append(f"# Method: {class_name}.{function_name}")
+        elif function_name:
+            parts.append(f"# Function: {function_name}")
+        elif class_name:
+            parts.append(f"# Class: {class_name}")
+        if language:
+            parts.append(f"# Language: {language}")
+        if chunk_type and chunk_type not in ("function", "method", "class"):
+            parts.append(f"# Type: {chunk_type}")
+
+        header = "\n".join(parts)
+        return f"{header}\n\n{text}"
 
 
 def _detect_text_language(extension: str) -> str:

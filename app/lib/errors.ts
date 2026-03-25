@@ -63,6 +63,25 @@ const ERROR_PATTERNS: Array<{
     }),
   },
 
+  // Embedding model errors
+  {
+    pattern: /embedding model ['"]?([^'"]+)['"]? not available/i,
+    resolve: (m) => ({
+      title: "Embedding model unavailable",
+      message: `The embedding model "${m[1]}" is not available. Indexing requires this model to generate vector embeddings.`,
+      hint: `Make sure Ollama is running and pull the model:\n  ollama serve\n  ollama pull ${m[1]}`,
+    }),
+  },
+  {
+    pattern: /embedding model not available/i,
+    resolve: () => ({
+      title: "Embedding model unavailable",
+      message:
+        "The embedding model is not available. Indexing requires Ollama running with an embedding model.",
+      hint: "Start Ollama and pull the model:\n  ollama serve\n  ollama pull nomic-embed-text",
+    }),
+  },
+
   // Model errors
   {
     pattern: /model ['"]?([^'"]+)['"]? not found/i,

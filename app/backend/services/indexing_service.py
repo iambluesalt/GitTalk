@@ -157,13 +157,22 @@ class IndexingService:
             chunk_buffer: list[CodeChunk] = []
             file_chunk_map: dict[str, list[str]] = {}  # rel_path → [chunk_ids]
             file_hash_map: dict[str, str] = {}  # rel_path → hash
+            embed_batch_num = 0
+
+            yield SSEEvent(
+                event="status",
+                data={
+                    "message": f"Parsing & chunking {len(files_to_index)} files...",
+                    "phase": "parse",
+                },
+            ).format()
 
             for file_path, file_hash in files_to_index:
                 rel_path = file_path.relative_to(clone_dir).as_posix()
                 files_processed += 1
 
-                # Progress event every 10 files or for last file
-                if files_processed % 10 == 0 or files_processed == len(files_to_index):
+                # Progress event every 3 files or for last file
+                if files_processed % 3 == 0 or files_processed == len(files_to_index):
                     yield SSEEvent(
                         event="indexing_progress",
                         data={
@@ -189,6 +198,14 @@ class IndexingService:
 
                 # Embed and store when buffer is large enough
                 if len(chunk_buffer) >= settings.EMBEDDING_BATCH_SIZE:
+                    embed_batch_num += 1
+                    yield SSEEvent(
+                        event="status",
+                        data={
+                            "message": f"Embedding batch {embed_batch_num} ({len(chunk_buffer)} chunks)...",
+                            "phase": "embed",
+                        },
+                    ).format()
                     stored = await self._embed_and_store(
                         project_id, chunk_buffer
                     )
@@ -197,6 +214,14 @@ class IndexingService:
 
             # Flush remaining chunks
             if chunk_buffer:
+                embed_batch_num += 1
+                yield SSEEvent(
+                    event="status",
+                    data={
+                        "message": f"Embedding final batch ({len(chunk_buffer)} chunks)...",
+                        "phase": "embed",
+                    },
+                ).format()
                 stored = await self._embed_and_store(project_id, chunk_buffer)
                 total_chunks_created += stored
 

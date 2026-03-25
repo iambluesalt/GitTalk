@@ -92,6 +92,9 @@ async def delete_all_projects():
             if child.is_dir():
                 safe_rmtree(child)
 
+    # Purge any orphaned vector tables (no valid projects left)
+    vector_db.purge_orphaned_tables(set())
+
     logger.info(f"Deleted all projects: {count} removed")
     return {"success": True, "message": f"Deleted {count} project(s)", "deleted_count": count}
 
@@ -103,13 +106,13 @@ async def delete_project(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # Clean all three stores — vector DB first (most likely to fail)
+    vector_deleted = vector_db.delete_table(project_id)
+    if not vector_deleted:
+        logger.warning(f"Vector table missing or failed for {project_id}, continuing cleanup")
+
     safe_rmtree(Path(project.clone_path))
     logger.info(f"Removed clone directory: {project.clone_path}")
-
-    try:
-        vector_db.delete_table(project_id)
-    except Exception as e:
-        logger.warning(f"Failed to delete vector table: {e}")
 
     db.delete_project(project_id)
 

@@ -35,6 +35,8 @@ import {
 } from "~/lib/api";
 import { cn, formatNumber, getLanguageColor, statusLabel, timeAgo } from "~/lib/utils";
 import TerminalProgress from "~/components/TerminalProgress";
+import ErrorCard from "~/components/ErrorCard";
+import { humanizeError } from "~/lib/errors";
 
 export function meta({}: Route.MetaArgs) {
   return [{ title: "Project Details — GitTalk" }];
@@ -348,13 +350,13 @@ export default function ProjectDetail() {
                   Chat
                 </Link>
               )}
-              {(project.status === "cloned" || isIndexed) && !indexing && (
+              {(project.status === "cloned" || isIndexed || isError) && !indexing && (
                 <button
                   onClick={handleIndex}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-elevated text-text-secondary font-medium text-sm hover:bg-hover hover:text-text-primary transition-colors"
                 >
                   <Database className="w-4 h-4" />
-                  {isIndexed ? "Re-index" : "Index"}
+                  {isError ? "Retry Index" : isIndexed ? "Re-index" : "Index"}
                 </button>
               )}
               <button
@@ -390,11 +392,24 @@ export default function ProjectDetail() {
         {/* Error banner */}
         {isError && project.error_message && (
           <div className="mb-6 p-4 rounded-xl border border-rose/20 bg-rose/5 animate-fade-in">
-            <div className="flex items-center gap-2 mb-1">
-              <AlertCircle className="w-4 h-4 text-rose" />
-              <span className="text-sm font-medium text-rose">Error</span>
+            <div className="flex items-center gap-3">
+              <div className="shrink-0">
+                <AlertCircle className="w-5 h-5 text-rose" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <span className="text-sm font-medium text-rose block">Error</span>
+                <p className="text-xs text-text-secondary mt-0.5">{project.error_message}</p>
+              </div>
+              {!indexing && (
+                <button
+                  onClick={handleIndex}
+                  className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-accent text-void font-display font-600 text-xs hover:bg-accent/90 transition-all shrink-0"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  Retry Index
+                </button>
+              )}
             </div>
-            <p className="text-xs text-text-secondary">{project.error_message}</p>
           </div>
         )}
 
@@ -432,8 +447,15 @@ export default function ProjectDetail() {
               </div>
             )}
             {indexError && (
-              <div className="p-3 rounded-lg border border-rose/20 bg-rose/5 text-sm text-rose">
-                {indexError}
+              <div className="space-y-3">
+                <ErrorCard error={humanizeError(indexError)} />
+                <button
+                  onClick={handleIndex}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-void font-display font-600 text-sm hover:bg-accent/90 transition-all hover:shadow-lg hover:shadow-accent/20"
+                >
+                  <Database className="w-4 h-4" />
+                  Retry Index
+                </button>
               </div>
             )}
           </div>
@@ -829,7 +851,7 @@ function FilesTab({
       filtered = files.filter(
         (f) =>
           f.file_path.toLowerCase().includes(q) ||
-          f.language.toLowerCase().includes(q)
+          (f.language || "").toLowerCase().includes(q)
       );
     }
     return buildTree(filtered);
@@ -913,9 +935,9 @@ function FilesTab({
       {files.length > 0 && (
         <div className="mt-3 flex items-center gap-4 text-xs text-text-ghost">
           <span>{files.length} indexed files</span>
-          <span>{formatNumber(files.reduce((s, f) => s + f.lines_count, 0))} total lines</span>
-          <span>{formatNumber(files.reduce((s, f) => s + f.functions.length, 0))} functions</span>
-          <span>{formatNumber(files.reduce((s, f) => s + f.classes.length, 0))} classes</span>
+          <span>{formatNumber(files.reduce((s, f) => s + (f.lines_count || 0), 0))} total lines</span>
+          <span>{formatNumber(files.reduce((s, f) => s + (f.functions?.length || 0), 0))} functions</span>
+          <span>{formatNumber(files.reduce((s, f) => s + (f.classes?.length || 0), 0))} classes</span>
         </div>
       )}
     </div>
@@ -1064,13 +1086,13 @@ function TreeNode({
         {formatNumber(file.lines_count)}
       </span>
       <span className="text-xs text-text-muted font-mono text-right tabular-nums self-center">
-        {file.functions.length || "—"}
+        {file.functions?.length || "—"}
       </span>
       <span className="text-xs text-text-muted font-mono text-right tabular-nums self-center">
-        {file.classes.length || "—"}
+        {file.classes?.length || "—"}
       </span>
       <span className="text-xs text-text-muted font-mono text-right tabular-nums self-center">
-        {file.imports.length || "—"}
+        {file.imports?.length || "—"}
       </span>
     </div>
   );

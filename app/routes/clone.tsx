@@ -685,13 +685,25 @@ export default function Clone() {
         {phase === "error" && error && (
           <div className="space-y-3 animate-fade-in-up">
             <ErrorCard error={humanizeError(error)} />
-            <button
-              onClick={reset}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-elevated text-text-secondary font-medium text-sm hover:bg-hover transition-colors"
-            >
-              <RotateCcw className="w-4 h-4" />
-              Try Again
-            </button>
+            <div className="flex gap-2">
+              {/* If project was cloned but indexing failed, offer retry indexing */}
+              {project && (
+                <button
+                  onClick={() => startIndexing()}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-accent text-void font-display font-600 text-sm hover:bg-accent/90 transition-all hover:shadow-lg hover:shadow-accent/20"
+                >
+                  <Database className="w-4 h-4" />
+                  Retry Indexing
+                </button>
+              )}
+              <button
+                onClick={reset}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-elevated text-text-secondary font-medium text-sm hover:bg-hover transition-colors"
+              >
+                <RotateCcw className="w-4 h-4" />
+                {project ? "Start Over" : "Try Again"}
+              </button>
+            </div>
           </div>
         )}
       </div>

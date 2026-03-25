@@ -205,6 +205,33 @@ class VectorDB:
             logger.warning(f"Failed to create FTS index: {e}")
             return False
 
+    def purge_orphaned_tables(self, valid_project_ids: set[str]) -> list[str]:
+        """Delete LanceDB tables that don't match any known project.
+
+        Args:
+            valid_project_ids: Set of project IDs that currently exist in SQLite.
+
+        Returns:
+            List of orphaned table names that were dropped.
+        """
+        dropped: list[str] = []
+        try:
+            for name in self._list_table_names():
+                # Reverse the _table_name() transform to get the project ID
+                if not name.startswith("project_"):
+                    continue
+                project_id = name[len("project_"):].replace("_", "-")
+                if project_id not in valid_project_ids:
+                    try:
+                        self.db.drop_table(name)
+                        dropped.append(name)
+                        logger.info(f"Purged orphaned vector table: {name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to purge orphaned table {name}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to list tables for orphan purge: {e}")
+        return dropped
+
     def is_healthy(self) -> bool:
         """Check if LanceDB is accessible."""
         try:

@@ -107,6 +107,12 @@ async def startup_event():
         from storage.vector_db import vector_db
 
         logger.info("Database connections initialized")
+
+        # Purge orphaned vector tables (left behind by partial deletes or crashes)
+        project_ids = {p.id for p in db.list_projects(limit=9999)}
+        orphans = vector_db.purge_orphaned_tables(project_ids)
+        if orphans:
+            logger.info(f"Cleaned up {len(orphans)} orphaned vector table(s)")
     except Exception as e:
         logger.error(f"Failed to initialize databases: {e}")
         raise

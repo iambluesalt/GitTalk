@@ -28,6 +28,8 @@ def _config_dict() -> dict:
         "max_search_results": settings.MAX_SEARCH_RESULTS,
         "chunk_max_tokens": settings.CHUNK_MAX_TOKENS,
         "retrieval_candidates": settings.RETRIEVAL_CANDIDATES,
+        "min_relevance_score": settings.MIN_RELEVANCE_SCORE,
+        "chunk_overlap_lines": settings.CHUNK_OVERLAP_LINES,
         "embedding_dimensions": settings.EMBEDDING_DIMENSIONS,
         "embedding_batch_size": settings.EMBEDDING_BATCH_SIZE,
         "indexing_workers": settings.INDEXING_WORKERS,

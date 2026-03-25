@@ -8,5 +8,6 @@ export default [
     route("projects/:projectId", "routes/project-detail.tsx"),
     route("chat/:projectId", "routes/chat.tsx"),
     route("settings", "routes/settings.tsx"),
+    route("guide", "routes/guide.tsx"),
   ]),
 ] satisfies RouteConfig;

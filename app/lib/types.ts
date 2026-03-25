@@ -144,6 +144,8 @@ export interface AppConfig {
   max_search_results: number;
   chunk_max_tokens: number;
   retrieval_candidates: number;
+  min_relevance_score: number;
+  chunk_overlap_lines: number;
   embedding_dimensions: number;
   embedding_batch_size: number;
   indexing_workers: number;
@@ -168,6 +170,8 @@ export type ConfigUpdate = Partial<{
   max_search_results: number;
   chunk_max_tokens: number;
   retrieval_candidates: number;
+  min_relevance_score: number;
+  chunk_overlap_lines: number;
   embedding_dimensions: number;
   embedding_batch_size: number;
   indexing_workers: number;

@@ -32,11 +32,19 @@ EXCLUDED_EXTENSIONS: set[str] = {
     ".map",
 }
 
-# Specific filenames to exclude (lock files, etc.)
+# Specific filenames to exclude (lock files, generated files, etc.)
 EXCLUDED_FILES: set[str] = {
     "package-lock.json", "poetry.lock", "Cargo.lock", "yarn.lock",
     "pnpm-lock.yaml", "composer.lock", "Gemfile.lock", "go.sum",
     ".DS_Store", "Thumbs.db",
+    # Generated / low-signal files
+    "migration_lock.toml", ".eslintcache", ".prettierignore",
+    "LICENSE", "LICENSE.md", "LICENSE.txt",
+}
+
+# Directories with auto-generated content that pollutes code search
+GENERATED_DIRS: set[str] = {
+    "migrations", "migration", "__snapshots__",
 }
 
 # Patterns that may contain secrets — skip for security
@@ -119,6 +127,8 @@ def should_exclude(file_path: Path, repo_root: Path, gitignore_patterns: list[st
     # Check directory exclusions
     for part in file_path.relative_to(repo_root).parts:
         if part in EXCLUDED_DIRS:
+            return True
+        if part in GENERATED_DIRS:
             return True
 
     # Check extension exclusions

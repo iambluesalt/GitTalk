@@ -11,6 +11,9 @@ from logger import logger
 class EmbeddingService:
     """Generates embeddings via Ollama /api/embed endpoint."""
 
+    # nomic-embed-text context limit is 8192 tokens; leave room for prefix overhead
+    MAX_EMBED_CHARS = 24000  # ~6000 tokens at 4 chars/token, safe margin
+
     def __init__(
         self,
         base_url: str | None = None,
@@ -22,9 +25,17 @@ class EmbeddingService:
         self.batch_size = batch_size or settings.EMBEDDING_BATCH_SIZE
         self.timeout = settings.OLLAMA_TIMEOUT
 
+    def _truncate(self, text: str) -> str:
+        """Truncate text to fit within embedding model context window."""
+        if len(text) <= self.MAX_EMBED_CHARS:
+            return text
+        return text[: self.MAX_EMBED_CHARS]
+
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """
-        Generate embeddings for a list of texts, batching as needed.
+        Generate embeddings for a list of document texts, batching as needed.
+        Automatically adds 'search_document: ' prefix for nomic-embed-text
+        and truncates texts that exceed the model's context window.
 
         Args:
             texts: List of text strings to embed
@@ -36,17 +47,30 @@ class EmbeddingService:
             return []
 
         all_embeddings: list[list[float]] = []
+        prefixed = [f"search_document: {self._truncate(t)}" for t in texts]
 
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
-            batch_embeddings = await self._embed_batch(batch)
-            all_embeddings.extend(batch_embeddings)
+        for i in range(0, len(prefixed), self.batch_size):
+            batch = prefixed[i : i + self.batch_size]
+            try:
+                batch_embeddings = await self._embed_batch(batch)
+                all_embeddings.extend(batch_embeddings)
+            except Exception as e:
+                # If batch fails (e.g. context length), fall back to one-by-one
+                logger.warning(f"Batch embed failed ({len(batch)} texts), retrying individually: {e}")
+                for text in batch:
+                    try:
+                        single = await self._embed_batch([text])
+                        all_embeddings.extend(single)
+                    except Exception as e2:
+                        logger.warning(f"Single embed failed, using zero vector: {e2}")
+                        all_embeddings.append([0.0] * settings.EMBEDDING_DIMENSIONS)
 
         return all_embeddings
 
     async def embed_single(self, text: str) -> list[float]:
-        """Generate embedding for a single text."""
-        results = await self._embed_batch([text])
+        """Generate embedding for a single query text.
+        Automatically adds 'search_query: ' prefix for nomic-embed-text."""
+        results = await self._embed_batch([f"search_query: {self._truncate(text)}"])
         if results:
             return results[0]
         return []

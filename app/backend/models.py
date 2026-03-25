@@ -53,6 +53,7 @@ class ConfigUpdate(BaseModel):
     ollama_base_url: Optional[str] = None
     ollama_model: Optional[str] = None
     ollama_embed_model: Optional[str] = None
+    router_model: Optional[str] = None
     ollama_timeout: Optional[int] = Field(None, ge=10, le=600)
     cloud_api_provider: Optional[str] = None
     cloud_api_key: Optional[str] = None
@@ -65,6 +66,8 @@ class ConfigUpdate(BaseModel):
     max_search_results: Optional[int] = Field(None, ge=1, le=50)
     chunk_max_tokens: Optional[int] = Field(None, ge=100, le=5000)
     retrieval_candidates: Optional[int] = Field(None, ge=5, le=200)
+    min_relevance_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    chunk_overlap_lines: Optional[int] = Field(None, ge=0, le=20)
     embedding_dimensions: Optional[int] = Field(None, ge=128, le=4096)
     embedding_batch_size: Optional[int] = Field(None, ge=1, le=512)
     indexing_workers: Optional[int] = Field(None, ge=1, le=32)

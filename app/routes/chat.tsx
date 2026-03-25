@@ -52,6 +52,7 @@ interface ChatEntry {
   content: string;
   sources?: CodeReference[];
   isStreaming?: boolean;
+  isSearching?: boolean;
   error?: ReturnType<typeof humanizeError>;
 }
 
@@ -187,10 +188,10 @@ export default function Chat() {
     setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
     setIsStreaming(true);
 
-    // Add placeholder assistant message
+    // Add placeholder assistant message (searching state)
     setMessages((prev) => [
       ...prev,
-      { role: "assistant", content: "", sources: [], isStreaming: true },
+      { role: "assistant", content: "", sources: [], isStreaming: true, isSearching: true },
     ]);
 
     let currentSources: CodeReference[] = [];
@@ -211,7 +212,7 @@ export default function Chat() {
               const next = [...prev];
               const last = next[next.length - 1];
               if (last.role === "assistant") {
-                next[next.length - 1] = { ...last, sources: currentSources };
+                next[next.length - 1] = { ...last, sources: currentSources, isSearching: false };
               }
               return next;
             });
@@ -548,6 +549,7 @@ export default function Chat() {
                       content={msg.content}
                       sources={msg.sources}
                       isStreaming={msg.isStreaming}
+                      isSearching={msg.isSearching}
                     />
                   )
                 )

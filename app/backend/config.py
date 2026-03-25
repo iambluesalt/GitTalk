@@ -48,16 +48,21 @@ class Settings(BaseSettings):
     CLOUD_MODEL: str | None = None
     CLOUD_TIMEOUT: int = 120
 
+    # Router (small/fast model for query classification & summarization)
+    ROUTER_MODEL: str = "lfm2.5-thinking:latest"
+
     # Embeddings
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
     EMBEDDING_BATCH_SIZE: int = 64
     EMBEDDING_DIMENSIONS: int = 768  # nomic-embed-text dimensions
 
     # RAG Configuration
-    MAX_CONTEXT_TOKENS: int = 8192
-    MAX_SEARCH_RESULTS: int = 5
+    MAX_CONTEXT_TOKENS: int = 32768
+    MAX_SEARCH_RESULTS: int = 8
     CHUNK_MAX_TOKENS: int = 1000
-    RETRIEVAL_CANDIDATES: int = 20
+    RETRIEVAL_CANDIDATES: int = 30
+    MIN_RELEVANCE_SCORE: float = 0.15
+    CHUNK_OVERLAP_LINES: int = 3
 
     # Performance
     INDEXING_WORKERS: int = 4

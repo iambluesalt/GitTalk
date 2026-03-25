@@ -46,6 +46,11 @@ class SearchService:
             logger.warning(f"Hybrid search failed, falling back to vector-only: {e}")
             results = self._do_vector_only_search(project_id, query_vector, limit)
 
+        # Filter out low-relevance results
+        threshold = settings.MIN_RELEVANCE_SCORE
+        if threshold > 0:
+            results = [r for r in results if r.relevance_score >= threshold]
+
         return results[:n_results]
 
     def _do_hybrid_search(
@@ -97,9 +102,15 @@ class SearchService:
 
         sorted_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)
 
+        # Normalize scores to 0-1 range
+        max_score = scores[sorted_ids[0]] if sorted_ids else 1.0
+        min_score = scores[sorted_ids[-1]] if sorted_ids else 0.0
+        score_range = max_score - min_score if max_score != min_score else 1.0
+
         results = []
         for chunk_id in sorted_ids:
             row = row_map[chunk_id]
+            normalized = (scores[chunk_id] - min_score) / score_range
             results.append(SearchResult(
                 chunk_id=chunk_id,
                 text=row.get("text", ""),
@@ -110,7 +121,7 @@ class SearchService:
                 line_start=row.get("line_start", 0),
                 line_end=row.get("line_end", 0),
                 chunk_type=row.get("chunk_type", ""),
-                relevance_score=scores[chunk_id],
+                relevance_score=round(normalized, 3),
             ))
 
         return results

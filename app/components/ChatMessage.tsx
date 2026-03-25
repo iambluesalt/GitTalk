@@ -10,6 +10,9 @@ import {
   FileCode2,
   ChevronDown,
   X,
+  Search,
+  Brain,
+  Loader2,
 } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { cn } from "~/lib/utils";
@@ -20,19 +23,38 @@ interface ChatMessageProps {
   content: string;
   sources?: CodeReference[];
   isStreaming?: boolean;
+  isSearching?: boolean;
   className?: string;
 }
 
 /**
- * Strip <think>...</think> blocks from reasoning models (e.g. deepseek-r1).
- * Returns { thinking, answer } where thinking is the internal reasoning (may be shown
- * collapsed) and answer is the visible response.
+ * Parse <think>...</think> blocks from reasoning models.
+ * Handles both complete and partial (streaming) think blocks.
  */
-function parseThinkingBlocks(text: string): {
+function parseThinkingBlocks(
+  text: string,
+  isStreaming: boolean
+): {
   thinking: string | null;
   answer: string;
+  isThinking: boolean; // true when still inside an unclosed <think> block
 } {
-  // Match <think>...</think> (greedy, may span multiple lines)
+  // Check for unclosed <think> block (streaming)
+  const openIdx = text.lastIndexOf("<think>");
+  const closeIdx = text.lastIndexOf("</think>");
+
+  if (isStreaming && openIdx !== -1 && (closeIdx === -1 || closeIdx < openIdx)) {
+    // We're inside an unclosed think block
+    const thinkContent = text.slice(openIdx + 7); // after <think>
+    const beforeThink = text.slice(0, openIdx).trim();
+    return {
+      thinking: thinkContent.trim() || null,
+      answer: beforeThink,
+      isThinking: true,
+    };
+  }
+
+  // Complete think blocks — extract all
   const thinkRegex = /<think>([\s\S]*?)<\/think>/gi;
   const thinkParts: string[] = [];
   const answer = text
@@ -44,7 +66,8 @@ function parseThinkingBlocks(text: string): {
 
   return {
     thinking: thinkParts.length > 0 ? thinkParts.join("\n\n") : null,
-    answer: answer || text,
+    answer: answer || (isStreaming ? "" : text),
+    isThinking: false,
   };
 }
 
@@ -53,15 +76,16 @@ export default function ChatMessage({
   content,
   sources,
   isStreaming,
+  isSearching,
   className,
 }: ChatMessageProps) {
   const isUser = role === "user";
-  const { thinking, answer } = useMemo(
+  const { thinking, answer, isThinking } = useMemo(
     () =>
       isUser
-        ? { thinking: null, answer: content }
-        : parseThinkingBlocks(content),
-    [content, isUser]
+        ? { thinking: null, answer: content, isThinking: false }
+        : parseThinkingBlocks(content, !!isStreaming),
+    [content, isUser, isStreaming]
   );
   const [showThinking, setShowThinking] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
@@ -93,6 +117,39 @@ export default function ChatMessage({
           isUser ? "items-end" : "items-start"
         )}
       >
+        {/* Retrieval indicator — shown while searching or when sources arrive during streaming */}
+        {!isUser && isSearching && (
+          <div className="flex items-center gap-2 px-3 py-2 mb-2 rounded-lg bg-accent/5 border border-accent/10 animate-fade-in">
+            <Search className="w-3.5 h-3.5 text-accent animate-pulse" />
+            <span className="text-xs text-accent font-medium">
+              Searching codebase...
+            </span>
+          </div>
+        )}
+
+        {/* Retrieved files indicator — show file names when sources arrive and streaming */}
+        {!isUser && !isSearching && isStreaming && hasSources && !sourcesOpen && (
+          <div className="flex items-center gap-2 px-3 py-1.5 mb-2 rounded-lg bg-surface border border-border-subtle animate-fade-in">
+            <FileCode2 className="w-3.5 h-3.5 text-accent shrink-0" />
+            <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+              <span className="text-[11px] text-text-muted shrink-0">Context from</span>
+              {sources!.slice(0, 4).map((src, i) => (
+                <span
+                  key={i}
+                  className="inline-flex items-center px-1.5 py-0.5 rounded bg-accent/8 text-[10px] font-mono text-accent/80 truncate max-w-[140px]"
+                >
+                  {src.file_path.split("/").pop()}
+                </span>
+              ))}
+              {sources!.length > 4 && (
+                <span className="text-[10px] text-text-ghost">
+                  +{sources!.length - 4} more
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Message bubble */}
         <div
           className={cn(
@@ -108,43 +165,80 @@ export default function ChatMessage({
             </p>
           ) : (
             <div className="markdown-body">
-              {/* Collapsible thinking block for reasoning models */}
-              {thinking && (
-                <div className="mb-3">
-                  <button
-                    onClick={() => setShowThinking(!showThinking)}
-                    className="flex items-center gap-1.5 text-xs text-text-muted hover:text-text-secondary transition-colors"
-                  >
-                    <span
-                      className={cn(
-                        "inline-block transition-transform",
-                        showThinking ? "rotate-90" : ""
-                      )}
-                    >
-                      ▶
+              {/* Thinking indicator — shown while model is actively reasoning */}
+              {isThinking && (
+                <div className="mb-3 animate-fade-in">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Brain className="w-3.5 h-3.5 text-purple animate-pulse" />
+                    <span className="text-xs text-purple font-medium">
+                      Thinking
+                      <span className="inline-flex ml-0.5">
+                        <span className="animate-bounce" style={{ animationDelay: "0ms" }}>.</span>
+                        <span className="animate-bounce" style={{ animationDelay: "150ms" }}>.</span>
+                        <span className="animate-bounce" style={{ animationDelay: "300ms" }}>.</span>
+                      </span>
                     </span>
-                    Thinking{isStreaming && !answer ? "…" : ""}
-                  </button>
-                  {showThinking && (
-                    <div className="mt-1.5 pl-3 border-l-2 border-border-subtle text-xs text-text-muted leading-relaxed whitespace-pre-wrap">
+                  </div>
+                  {thinking && (
+                    <div className="pl-3 border-l-2 border-purple/20 text-xs text-text-muted leading-relaxed whitespace-pre-wrap max-h-32 overflow-y-auto">
                       {thinking}
                     </div>
                   )}
                 </div>
               )}
 
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                rehypePlugins={[rehypeHighlight]}
-                components={{
-                  pre: ({ children, ...props }) => (
-                    <PreBlock {...props}>{children}</PreBlock>
-                  ),
-                }}
-              >
-                {answer}
-              </ReactMarkdown>
-              {isStreaming && (
+              {/* Completed thinking block — collapsible */}
+              {!isThinking && thinking && (
+                <div className="mb-3">
+                  <button
+                    onClick={() => setShowThinking(!showThinking)}
+                    className="flex items-center gap-1.5 text-xs text-text-muted hover:text-text-secondary transition-colors group"
+                  >
+                    <Brain className="w-3 h-3 text-purple/50 group-hover:text-purple/70" />
+                    <span
+                      className={cn(
+                        "inline-block transition-transform text-[10px]",
+                        showThinking ? "rotate-90" : ""
+                      )}
+                    >
+                      &#9654;
+                    </span>
+                    <span>
+                      Thought for a moment
+                    </span>
+                  </button>
+                  {showThinking && (
+                    <div className="mt-1.5 pl-3 border-l-2 border-purple/15 text-xs text-text-muted leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto animate-fade-in">
+                      {thinking}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Main answer */}
+              {answer ? (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeHighlight]}
+                  components={{
+                    pre: ({ children, ...props }) => (
+                      <PreBlock {...props}>{children}</PreBlock>
+                    ),
+                  }}
+                >
+                  {answer}
+                </ReactMarkdown>
+              ) : (
+                // Show spinner if no answer yet and not in thinking mode
+                !isThinking && isStreaming && !isSearching && (
+                  <div className="flex items-center gap-2 py-1">
+                    <Loader2 className="w-3.5 h-3.5 text-purple/50 animate-spin" />
+                    <span className="text-xs text-text-muted">Generating response...</span>
+                  </div>
+                )
+              )}
+
+              {isStreaming && answer && (
                 <span className="inline-block w-2 h-4 ml-0.5 bg-purple/80 animate-typewriter-blink align-middle" />
               )}
             </div>
@@ -152,7 +246,7 @@ export default function ChatMessage({
         </div>
 
         {/* Sources trigger — compact pill below message */}
-        {hasSources && (
+        {hasSources && !isStreaming && (
           <SourcesDrawer
             sources={sources!}
             open={sourcesOpen}
@@ -164,7 +258,7 @@ export default function ChatMessage({
   );
 }
 
-/* ─── Sources Drawer ─── */
+/* --- Sources Drawer --- */
 
 function SourcesDrawer({
   sources,
@@ -247,7 +341,7 @@ function SourcesDrawer({
   );
 }
 
-/* ─── Source Card ─── */
+/* --- Source Card --- */
 
 function SourceCard({
   source,
@@ -361,7 +455,7 @@ function SourceCard({
   );
 }
 
-/* ─── Code Block with Copy ─── */
+/* --- Code Block with Copy --- */
 
 function PreBlock({
   children,
@@ -383,7 +477,7 @@ function PreBlock({
     return extractText(children);
   }, [children]);
 
-  // Extract language from className (e.g. "language-python" → "python")
+  // Extract language from className (e.g. "language-python" -> "python")
   const language = useMemo(() => {
     const extractLang = (node: React.ReactNode): string => {
       if (node && typeof node === "object" && "props" in node) {

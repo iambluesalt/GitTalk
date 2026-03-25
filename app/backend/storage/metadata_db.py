@@ -136,6 +136,8 @@ class MetadataDB:
             self._safe_add_column(cursor, "projects", "error_message", "TEXT")
             self._safe_add_column(cursor, "code_index", "file_hash", "TEXT")
             self._safe_add_column(cursor, "code_index", "chunk_ids", "TEXT")
+            self._safe_add_column(cursor, "conversations", "summary", "TEXT")
+            self._safe_add_column(cursor, "conversations", "summarized_up_to", "INTEGER DEFAULT 0")
 
             conn.commit()
             logger.info("Database schema initialized successfully")
@@ -640,6 +642,53 @@ class MetadataDB:
             ConversationTurn(role=row["role"], content=row["content"])
             for row in rows
         ]
+
+    def get_conversation_summary(self, conversation_id: str) -> tuple[str | None, int]:
+        """
+        Get the rolling summary and the message count it covers.
+
+        Returns:
+            (summary_text or None, summarized_up_to count)
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT summary, summarized_up_to FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None, 0
+            return row["summary"], row["summarized_up_to"] or 0
+
+    def update_conversation_summary(
+        self, conversation_id: str, summary: str, summarized_up_to: int
+    ) -> bool:
+        """Store a rolling conversation summary."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE conversations
+                   SET summary = ?, summarized_up_to = ?, updated_at = ?
+                   WHERE id = ?""",
+                (summary, summarized_up_to, datetime.now(), conversation_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_all_conversation_messages(
+        self, conversation_id: str
+    ) -> List[Dict[str, Any]]:
+        """Get ALL messages for a conversation (no limit), for summarization."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT id, role, content, sources_json, response_time_ms, created_at
+                   FROM messages
+                   WHERE conversation_id = ?
+                   ORDER BY created_at ASC""",
+                (conversation_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def delete_conversation(self, conversation_id: str) -> bool:
         """Delete a conversation and its messages."""
