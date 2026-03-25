@@ -15,10 +15,16 @@ import {
   Eye,
   ChevronDown,
   ChevronUp,
+  Star,
+  GitFork,
+  Globe,
+  Lock,
+  AlertTriangle,
+  Info,
 } from "lucide-react";
 import type { Route } from "./+types/clone";
-import type { Project, RepositoryAnalysis } from "~/lib/types";
-import { cloneRepo, indexProject, getProject, parseSSEStream } from "~/lib/api";
+import type { Project, RepositoryAnalysis, PreflightInfo } from "~/lib/types";
+import { cloneRepo, clonePreflight, indexProject, getProject, parseSSEStream } from "~/lib/api";
 import TerminalProgress from "~/components/TerminalProgress";
 import ErrorCard from "~/components/ErrorCard";
 import { humanizeError } from "~/lib/errors";
@@ -33,7 +39,7 @@ interface LogLine {
   text: string;
 }
 
-type Phase = "input" | "cloning" | "cloned" | "indexing" | "indexed" | "error";
+type Phase = "input" | "preflight" | "ready" | "cloning" | "cloned" | "indexing" | "indexed" | "error";
 
 interface IndexingStats {
   filesIndexed: number;
@@ -53,6 +59,7 @@ export default function Clone() {
   const [error, setError] = useState<string | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState(true);
   const [indexStats, setIndexStats] = useState<IndexingStats | null>(null);
+  const [preflight, setPreflight] = useState<PreflightInfo | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Elapsed time tracking
@@ -89,7 +96,7 @@ export default function Clone() {
     if (indexId) {
       startIndexing(indexId);
     } else if (searchParams.get("url") && url) {
-      startClone();
+      handleClone();
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -111,6 +118,33 @@ export default function Clone() {
       setEta(null);
     }
   }, []);
+
+  const handleClone = async () => {
+    if (!url.trim()) return;
+    setError(null);
+    setPreflight(null);
+
+    // Run preflight in background — non-blocking
+    // If it succeeds, show the info card. If it fails, we still clone.
+    setPhase("preflight");
+    let preflightOk = false;
+    try {
+      const info = await clonePreflight(url.trim());
+      setPreflight(info);
+      if (info.size_warning === "too_large") {
+        setError(info.size_warning_message);
+        setPhase("error");
+        return; // Only block on too_large
+      }
+      preflightOk = true;
+    } catch {
+      // Preflight failed (backend down, no network, rate limit) — proceed to clone anyway
+      // The clone endpoint does its own size check
+    }
+
+    // Auto-start clone
+    startClone();
+  };
 
   const startClone = async () => {
     if (!url.trim()) return;
@@ -274,6 +308,7 @@ export default function Clone() {
     setElapsed(0);
     setEta(null);
     setIndexStats(null);
+    setPreflight(null);
   };
 
   const isWorking = phase === "cloning" || phase === "indexing";
@@ -300,7 +335,7 @@ export default function Clone() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                startClone();
+                handleClone();
               }}
             >
               <label className="block text-xs font-medium text-text-secondary mb-2">
@@ -312,7 +347,16 @@ export default function Clone() {
                   <input
                     type="text"
                     value={url}
-                    onChange={(e) => setUrl(e.target.value)}
+                    onChange={(e) => {
+                      setUrl(e.target.value);
+                      // Reset preflight if URL changes
+                      if (preflight) {
+                        setPreflight(null);
+                      }
+                      if (phase !== "input") {
+                        setPhase("input");
+                      }
+                    }}
                     placeholder="https://github.com/owner/repo"
                     disabled={isWorking}
                     className="w-full pl-10 pr-4 py-3 rounded-xl bg-surface border border-border-default text-text-primary placeholder:text-text-ghost text-sm font-mono focus:outline-none focus:border-accent/40 focus:shadow-[0_0_0_3px_rgba(0,212,255,0.1)] disabled:opacity-50 transition-all"
@@ -320,10 +364,15 @@ export default function Clone() {
                 </div>
                 <button
                   type="submit"
-                  disabled={!isValidUrl || isWorking}
+                  disabled={!isValidUrl || isWorking || phase === "preflight"}
                   className="flex items-center gap-2 px-5 py-3 rounded-xl bg-accent text-void font-display font-600 text-sm hover:bg-accent/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all hover:shadow-lg hover:shadow-accent/20"
                 >
-                  {isWorking ? (
+                  {phase === "preflight" ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-void/30 border-t-void rounded-full animate-spin" />
+                      Checking…
+                    </>
+                  ) : isWorking ? (
                     <>
                       <span className="w-4 h-4 border-2 border-void/30 border-t-void rounded-full animate-spin" />
                       Working…
@@ -340,6 +389,107 @@ export default function Clone() {
           </div>
         )}
 
+        {/* Preflight: Repo Overview Card */}
+        {preflight && phase !== "input" && phase !== "error" && (
+          <div className="mb-6 animate-fade-in-up">
+            <div className="glass-card rounded-xl overflow-hidden">
+              {/* Repo header */}
+              <div className="px-5 py-4 flex items-start gap-3">
+                <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-accent/10 shrink-0 mt-0.5">
+                  {preflight.private ? (
+                    <Lock className="w-5 h-5 text-amber" />
+                  ) : (
+                    <Globe className="w-5 h-5 text-accent" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-display font-600 text-text-primary truncate">
+                      {preflight.full_name}
+                    </h3>
+                    {preflight.private && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber/10 text-amber">
+                        Private
+                      </span>
+                    )}
+                  </div>
+                  {preflight.description && (
+                    <p className="text-xs text-text-secondary mt-0.5 line-clamp-2">
+                      {preflight.description}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-4 mt-2">
+                    {preflight.language && (
+                      <span className="inline-flex items-center gap-1.5 text-xs text-text-muted">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full"
+                          style={{ backgroundColor: getLanguageColor(preflight.language) }}
+                        />
+                        {preflight.language}
+                      </span>
+                    )}
+                    <span className="inline-flex items-center gap-1 text-xs text-text-muted">
+                      <Star className="w-3 h-3" />
+                      {formatNumber(preflight.stars)}
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-xs text-text-muted">
+                      <GitFork className="w-3 h-3" />
+                      {formatNumber(preflight.forks)}
+                    </span>
+                    {preflight.updated_at && (
+                      <span className="text-xs text-text-ghost">
+                        Updated {new Date(preflight.updated_at).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Size + warning bar */}
+              <div
+                className={cn(
+                  "px-5 py-3 border-t border-border-subtle flex items-center gap-3",
+                  preflight.size_warning === "ok" && "bg-green/5",
+                  preflight.size_warning === "medium" && "bg-amber/5",
+                  preflight.size_warning === "large" && "bg-orange/5",
+                  preflight.size_warning === "too_large" && "bg-rose/5"
+                )}
+              >
+                {preflight.size_warning === "ok" ? (
+                  <CheckCircle2 className="w-4 h-4 text-green shrink-0" />
+                ) : preflight.size_warning === "too_large" ? (
+                  <AlertCircle className="w-4 h-4 text-rose shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-amber shrink-0" />
+                )}
+                <span
+                  className={cn(
+                    "text-xs font-medium flex-1",
+                    preflight.size_warning === "ok" && "text-green",
+                    preflight.size_warning === "medium" && "text-amber",
+                    preflight.size_warning === "large" && "text-orange",
+                    preflight.size_warning === "too_large" && "text-rose"
+                  )}
+                >
+                  {preflight.size_warning_message}
+                </span>
+                <span className="text-xs font-mono text-text-ghost">
+                  {preflight.size_mb < 1 ? `${preflight.size_kb}KB` : `${preflight.size_mb.toFixed(1)}MB`}
+                </span>
+              </div>
+
+              {/* Shallow clone indicator */}
+              <div className="px-5 py-2.5 border-t border-border-subtle bg-surface/50 flex items-center gap-2">
+                <Info className="w-3.5 h-3.5 text-accent shrink-0" />
+                <span className="text-[11px] text-text-muted">
+                  <span className="text-accent font-medium">Shallow clone</span>
+                  {" "}— only the latest snapshot is fetched (no git history). This is faster and uses less disk space.
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Terminal */}
         {logs.length > 0 && (
           <div className="mb-6 animate-fade-in-up">
@@ -347,7 +497,7 @@ export default function Clone() {
               lines={logs}
               title={
                 phase === "cloning"
-                  ? "git clone"
+                  ? "git clone --depth 1"
                   : phase === "indexing"
                   ? "indexing"
                   : phase === "indexed"

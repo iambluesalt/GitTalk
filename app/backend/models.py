@@ -179,6 +179,24 @@ class IndexProgressEvent(BaseModel):
     percent: float = 0.0
 
 
+class PreflightResponse(BaseModel):
+    """Pre-clone repo info from GitHub API."""
+    name: str
+    full_name: str
+    description: Optional[str] = None
+    size_kb: int = 0
+    size_mb: float = 0.0
+    stars: int = 0
+    forks: int = 0
+    default_branch: str = "main"
+    language: Optional[str] = None
+    updated_at: Optional[str] = None
+    private: bool = False
+    max_size_mb: int = 500
+    size_warning: Literal["ok", "medium", "large", "too_large"] = "ok"
+    size_warning_message: str = ""
+
+
 class ErrorResponse(BaseModel):
     """Error response model."""
     error: str

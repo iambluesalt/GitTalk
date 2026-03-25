@@ -19,16 +19,24 @@ from services.clone_service import safe_rmtree
 router = APIRouter()
 
 
-@router.get("/projects", response_model=ProjectListResponse)
+@router.get("/projects")
 async def list_projects(limit: int = Query(50, ge=1, le=200)):
-    """List all projects with optional limit."""
+    """List all projects with optional limit. Includes index counts per project."""
     projects = db.list_projects(limit=limit)
     recent = db.get_recent_projects(limit=5)
-    return ProjectListResponse(
-        projects=projects,
-        total=len(projects),
-        recent_projects=recent,
-    )
+    index_counts = db.get_bulk_index_counts()
+
+    def enrich(p: ProjectMetadata) -> dict:
+        d = p.model_dump(mode="json")
+        counts = index_counts.get(p.id)
+        d["index_counts"] = counts or {"files_indexed": 0, "chunks_created": 0}
+        return d
+
+    return {
+        "projects": [enrich(p) for p in projects],
+        "total": len(projects),
+        "recent_projects": [enrich(p) for p in recent],
+    }
 
 
 @router.get("/projects/{project_id}", response_model=ProjectMetadata)
@@ -38,6 +46,26 @@ async def get_project(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+@router.get("/projects/{project_id}/index-stats")
+async def get_index_stats(project_id: str):
+    """Get aggregate index statistics for a project."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    stats = db.get_index_stats(project_id)
+    return stats
+
+
+@router.get("/projects/{project_id}/files")
+async def get_project_files(project_id: str):
+    """Get indexed file data for a project (code index summary)."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    files = db.get_project_files(project_id)
+    return {"files": files, "total": len(files)}
 
 
 @router.delete("/projects")

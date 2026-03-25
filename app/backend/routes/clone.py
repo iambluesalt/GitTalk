@@ -7,12 +7,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from config import settings
 from logger import logger
-from models import CloneRequest, ProjectMetadata, ProjectStatus, SSEEvent
+from models import CloneRequest, PreflightResponse, ProjectMetadata, ProjectStatus, SSEEvent
 from storage.metadata_db import db
 from services.clone_service import CloneService, safe_rmtree
 from services.analyzer_service import AnalyzerService
@@ -21,6 +21,78 @@ from utils.validators import validate_github_url, sanitize_clone_dir_name
 router = APIRouter()
 clone_service = CloneService()
 analyzer_service = AnalyzerService()
+
+
+@router.get("/clone/preflight", response_model=PreflightResponse)
+async def clone_preflight(url: str):
+    """
+    Check a GitHub repo via API before cloning.
+    Returns metadata, size, and a tiered size warning.
+    One API call, no cloning.
+    """
+    try:
+        normalized_url, owner, repo = validate_github_url(url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    import httpx
+
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if settings.GITHUB_TOKEN:
+        headers["Authorization"] = f"token {settings.GITHUB_TOKEN}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}",
+                headers=headers,
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        if e.response.status_code == 403:
+            raise HTTPException(status_code=429, detail="GitHub API rate limit reached. Configure a GitHub token in Settings.")
+        raise HTTPException(status_code=502, detail=f"GitHub API error: {e.response.status_code}")
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="Could not reach GitHub API")
+
+    size_kb = data.get("size", 0)
+    size_mb = size_kb / 1024
+    max_size = settings.MAX_REPO_SIZE_MB
+
+    # Tiered warnings
+    if size_mb > max_size:
+        warning = "too_large"
+        message = f"Repository is {size_mb:.0f}MB — exceeds the {max_size}MB limit"
+    elif size_mb > max_size * 0.6:
+        warning = "large"
+        message = f"Large repository ({size_mb:.0f}MB) — clone may take a while"
+    elif size_mb > 100:
+        warning = "medium"
+        message = f"Medium repository ({size_mb:.0f}MB) — should clone in under a minute"
+    else:
+        warning = "ok"
+        message = f"Light repository ({size_mb:.1f}MB) — clones fast"
+
+    return PreflightResponse(
+        name=data.get("name", repo),
+        full_name=data.get("full_name", f"{owner}/{repo}"),
+        description=data.get("description"),
+        size_kb=size_kb,
+        size_mb=round(size_mb, 2),
+        stars=data.get("stargazers_count", 0),
+        forks=data.get("forks_count", 0),
+        default_branch=data.get("default_branch", "main"),
+        language=data.get("language"),
+        updated_at=data.get("updated_at"),
+        private=data.get("private", False),
+        max_size_mb=max_size,
+        size_warning=warning,
+        size_warning_message=message,
+    )
 
 
 @router.post("/clone")

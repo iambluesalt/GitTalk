@@ -9,20 +9,16 @@ import {
   Settings,
   CircleCheck,
   CircleX,
-  CircleDot,
   Server,
   Brain,
   Cloud,
   Database,
   ChevronDown,
   ChevronUp,
-  Sun,
-  Moon,
 } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { cn } from "~/lib/utils";
 import { getHealth } from "~/lib/api";
-import { useTheme } from "~/lib/theme";
 import type { HealthResponse } from "~/lib/types";
 
 const NAV_ITEMS = [
@@ -70,8 +66,6 @@ export default function AppLayout() {
   const [backendDown, setBackendDown] = useState(false);
   const [servicesExpanded, setServicesExpanded] = useState(false);
   const location = useLocation();
-  const { theme, toggle: toggleTheme } = useTheme();
-
   const fetchHealth = useCallback(() => {
     getHealth()
       .then((h) => {
@@ -159,19 +153,6 @@ export default function AppLayout() {
             <span>Settings</span>
           </NavLink>
 
-          {/* Theme toggle */}
-          <button
-            onClick={toggleTheme}
-            className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-hover transition-all duration-200 w-full whitespace-nowrap"
-            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-          >
-            {theme === "dark" ? (
-              <Sun className="w-4.5 h-4.5 shrink-0" />
-            ) : (
-              <Moon className="w-4.5 h-4.5 shrink-0" />
-            )}
-            <span>{theme === "dark" ? "Light Mode" : "Dark Mode"}</span>
-          </button>
         </nav>
 
         {/* Service status footer */}

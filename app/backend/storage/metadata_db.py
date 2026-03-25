@@ -360,6 +360,74 @@ class MetadataDB:
             logger.error(f"Failed to add file to index: {e}")
             return False
 
+    def get_index_stats(self, project_id: str) -> Dict[str, Any]:
+        """Get aggregate index statistics for a project."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as files_indexed,
+                    COALESCE(SUM(lines_count), 0) as total_lines,
+                    COALESCE(SUM(json_array_length(functions)), 0) as total_functions,
+                    COALESCE(SUM(json_array_length(classes)), 0) as total_classes,
+                    COALESCE(SUM(json_array_length(imports)), 0) as total_imports,
+                    COUNT(DISTINCT language) as languages_count
+                FROM code_index WHERE project_id = ?
+            """, (project_id,))
+            row = cursor.fetchone()
+            if not row or row["files_indexed"] == 0:
+                return {
+                    "files_indexed": 0,
+                    "total_lines": 0,
+                    "total_functions": 0,
+                    "total_classes": 0,
+                    "total_imports": 0,
+                    "languages_count": 0,
+                    "chunks_created": 0,
+                }
+
+            # Count chunks from chunk_ids JSON arrays
+            cursor.execute("""
+                SELECT chunk_ids FROM code_index
+                WHERE project_id = ? AND chunk_ids IS NOT NULL AND chunk_ids != ''
+            """, (project_id,))
+            total_chunks = 0
+            for r in cursor.fetchall():
+                try:
+                    chunks = json.loads(r["chunk_ids"])
+                    total_chunks += len(chunks) if isinstance(chunks, list) else 0
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            return {
+                "files_indexed": row["files_indexed"],
+                "total_lines": row["total_lines"],
+                "total_functions": row["total_functions"],
+                "total_classes": row["total_classes"],
+                "total_imports": row["total_imports"],
+                "languages_count": row["languages_count"],
+                "chunks_created": total_chunks,
+            }
+
+    def get_bulk_index_counts(self) -> Dict[str, Dict[str, int]]:
+        """Get indexed file count and chunk count for all projects (single query)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT project_id,
+                       COUNT(*) as files_indexed,
+                       COALESCE(SUM(json_array_length(CASE WHEN chunk_ids IS NOT NULL AND chunk_ids != '' THEN chunk_ids ELSE '[]' END)), 0) as chunks_created
+                FROM code_index
+                GROUP BY project_id
+            """)
+            result = {}
+            for row in cursor.fetchall():
+                result[row["project_id"]] = {
+                    "files_indexed": row["files_indexed"],
+                    "chunks_created": row["chunks_created"],
+                }
+            return result
+
     def get_project_files(self, project_id: str) -> List[Dict[str, Any]]:
         """Get all indexed files for a project."""
         with self.get_connection() as conn:

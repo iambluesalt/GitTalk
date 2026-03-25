@@ -1,6 +1,8 @@
 import type {
   Project,
   ProjectListResponse,
+  PreflightInfo,
+  IndexStats,
   Conversation,
   Message,
   SSEMessage,
@@ -97,6 +99,31 @@ export async function getProject(id: string): Promise<Project> {
 
 export async function deleteProject(id: string): Promise<void> {
   await fetchJSON(`/projects/${id}`, { method: "DELETE" });
+}
+
+export interface ProjectFile {
+  file_path: string;
+  file_type: string;
+  language: string;
+  lines_count: number;
+  functions: string[];
+  classes: string[];
+  imports: string[];
+  last_indexed: string;
+}
+
+export async function getProjectFiles(id: string): Promise<{ files: ProjectFile[]; total: number }> {
+  return fetchJSON(`/projects/${id}/files`);
+}
+
+export async function getIndexStats(id: string): Promise<IndexStats> {
+  return fetchJSON<IndexStats>(`/projects/${id}/index-stats`);
+}
+
+// --- Clone Preflight ---
+
+export async function clonePreflight(url: string): Promise<PreflightInfo> {
+  return fetchJSON<PreflightInfo>(`/clone/preflight?url=${encodeURIComponent(url)}`);
 }
 
 // --- Clone (SSE) ---

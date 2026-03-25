@@ -17,6 +17,11 @@ export interface RepositoryAnalysis {
   primary_language: string | null;
 }
 
+export interface ProjectIndexCounts {
+  files_indexed: number;
+  chunks_created: number;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -29,6 +34,7 @@ export interface Project {
   analysis: RepositoryAnalysis | null;
   repo_map: string | null;
   error_message: string | null;
+  index_counts?: ProjectIndexCounts;
 }
 
 export interface ProjectListResponse {
@@ -70,6 +76,33 @@ export interface ChatModel {
   id: string;
   name: string;
   provider: string;
+}
+
+export interface IndexStats {
+  files_indexed: number;
+  total_lines: number;
+  total_functions: number;
+  total_classes: number;
+  total_imports: number;
+  languages_count: number;
+  chunks_created: number;
+}
+
+export interface PreflightInfo {
+  name: string;
+  full_name: string;
+  description: string | null;
+  size_kb: number;
+  size_mb: number;
+  stars: number;
+  forks: number;
+  default_branch: string;
+  language: string | null;
+  updated_at: string | null;
+  private: boolean;
+  max_size_mb: number;
+  size_warning: "ok" | "medium" | "large" | "too_large";
+  size_warning_message: string;
 }
 
 export interface CloneProgress {

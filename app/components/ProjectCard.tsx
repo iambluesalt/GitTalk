@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import {
   MessageSquare,
   Database,
@@ -7,6 +7,8 @@ import {
   Play,
   GitBranch,
   ExternalLink,
+  Layers,
+  Braces,
 } from "lucide-react";
 import type { Project } from "~/lib/types";
 import {
@@ -32,6 +34,7 @@ export default function ProjectCard({
   className,
   style,
 }: ProjectCardProps) {
+  const navigate = useNavigate();
   const {
     id,
     name,
@@ -55,8 +58,9 @@ export default function ProjectCard({
 
   return (
     <div
+      onClick={() => navigate(`/projects/${id}`)}
       className={cn(
-        "group relative flex flex-col rounded-xl border border-border-subtle bg-surface",
+        "group relative flex flex-col rounded-xl border border-border-subtle bg-surface cursor-pointer",
         "transition-all duration-300 hover:border-border-bright hover:shadow-lg hover:shadow-accent/5",
         isWorking && "border-amber/20",
         isError && "border-rose/20",
@@ -93,6 +97,7 @@ export default function ProjectCard({
             href={github_url}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
             className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-accent transition-colors mt-0.5"
           >
             <span className="truncate max-w-[180px]">
@@ -182,8 +187,25 @@ export default function ProjectCard({
         </div>
       )}
 
+      {/* Index counts (when indexed) */}
+      {isReady && project.index_counts && project.index_counts.files_indexed > 0 && (
+        <div className="flex items-center gap-3 px-4 pb-3">
+          <span className="inline-flex items-center gap-1 text-[11px] text-text-muted">
+            <Layers className="w-3 h-3 text-accent" />
+            {formatNumber(project.index_counts.files_indexed)} indexed
+          </span>
+          <span className="inline-flex items-center gap-1 text-[11px] text-text-muted">
+            <Braces className="w-3 h-3 text-purple" />
+            {formatNumber(project.index_counts.chunks_created)} chunks
+          </span>
+        </div>
+      )}
+
       {/* Footer actions */}
-      <div className="flex items-center gap-2 px-4 py-3 mt-auto border-t border-border-subtle">
+      <div
+        className="flex items-center gap-2 px-4 py-3 mt-auto border-t border-border-subtle"
+        onClick={(e) => e.stopPropagation()}
+      >
         {isReady && (
           <Link
             to={`/chat/${id}`}
