@@ -313,10 +313,11 @@ class IndexingService:
         if not chunks:
             return 0
 
-        texts = [c.text for c in chunks]
+        # Embed using contextualized text (with headers for better retrieval)
+        embed_texts = [c.embedding_text for c in chunks]
 
         try:
-            embeddings = await embedding_service.embed_texts(texts)
+            embeddings = await embedding_service.embed_texts(embed_texts)
         except Exception as e:
             logger.error(f"Embedding failed: {e}")
             return 0
@@ -328,7 +329,8 @@ class IndexingService:
             return 0
 
         ids = [c.id for c in chunks]
-        documents = texts
+        # Store raw text (no headers) for BM25 search and LLM display
+        documents = [c.text for c in chunks]
         metadatas = [
             {
                 "file_path": c.file_path,

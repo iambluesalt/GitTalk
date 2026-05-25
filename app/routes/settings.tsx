@@ -136,7 +136,7 @@ const SERVICE_INFO: Record<
     critical: false,
     description: "Cloud LLM fallback when Ollama is unavailable.",
     offlineHelp:
-      "Set CLOUD_API_KEY, CLOUD_API_BASE_URL, and CLOUD_MODEL in your .env file.",
+      "Configure Cloud Provider, API Key, API URL, and Model in the LLM Configuration section below, then save.",
   },
   ollama_embed: {
     label: "Embedding Model",
@@ -871,8 +871,8 @@ export default function SettingsPage() {
               <HelpStep
                 step="3"
                 title="(Optional) Add cloud fallback"
-                code='CLOUD_API_KEY=your-key\nCLOUD_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai\nCLOUD_MODEL=gemini-2.0-flash'
-                description="Or configure above — the form saves directly to .env."
+                code="Fill in Cloud Provider, API Key, API URL, and Cloud Model above, then click Save Changes."
+                description="Supports any OpenAI-compatible endpoint (Gemini, OpenRouter, Groq, etc.)."
               />
             </div>
           </div>

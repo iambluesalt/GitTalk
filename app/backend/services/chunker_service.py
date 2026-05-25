@@ -16,7 +16,8 @@ from services.treesitter_service import TreeSitterService, treesitter_service
 class CodeChunk:
     """A chunk of code or text ready for embedding."""
     id: str
-    text: str
+    text: str               # raw code (stored in DB, used for BM25 & display)
+    embedding_text: str     # code with context header (used only for embedding)
     file_path: str          # relative to repo root
     language: str
     function_name: str | None
@@ -250,12 +251,17 @@ class CodeChunker:
         chunk_type: str,
     ) -> list[CodeChunk]:
         """Split text into chunks that fit within token limits, splitting at line boundaries.
-        Carries forward overlap lines between chunks to preserve context at boundaries."""
+        Carries forward overlap lines between chunks to preserve context at boundaries.
+        Continuation chunks get a signature breadcrumb so they aren't meaningless fragments."""
         lines = text.split("\n")
         chunks = []
         current_lines: list[str] = []
         current_start = base_line
         overlap = settings.CHUNK_OVERLAP_LINES
+        chunk_index = 0
+
+        # Extract signature (first line) for breadcrumbs on continuation chunks
+        signature = lines[0].strip() if lines else ""
 
         for i, line in enumerate(lines):
             current_lines.append(line)
@@ -267,6 +273,10 @@ class CodeChunker:
                 emit_lines = current_lines[:-1]
                 chunk_text = "\n".join(emit_lines)
                 if chunk_text.strip():
+                    # Add breadcrumb to all continuation chunks (not the first)
+                    if chunk_index > 0 and signature:
+                        breadcrumb = f"# ... continued from: {signature}\n"
+                        chunk_text = breadcrumb + chunk_text
                     chunks.append(self._make_chunk(
                         text=chunk_text,
                         file_path=file_path,
@@ -277,6 +287,7 @@ class CodeChunker:
                         line_end=current_start + len(emit_lines) - 1,
                         chunk_type=chunk_type,
                     ))
+                    chunk_index += 1
                 # Carry forward overlap lines from end of emitted chunk
                 carry = emit_lines[-overlap:] if overlap > 0 else []
                 current_lines = carry + [line]
@@ -286,6 +297,10 @@ class CodeChunker:
         if current_lines:
             chunk_text = "\n".join(current_lines)
             if chunk_text.strip():
+                # Add breadcrumb to continuation chunks
+                if chunk_index > 0 and signature:
+                    breadcrumb = f"# ... continued from: {signature}\n"
+                    chunk_text = breadcrumb + chunk_text
                 chunks.append(self._make_chunk(
                     text=chunk_text,
                     file_path=file_path,
@@ -391,7 +406,8 @@ class CodeChunker:
         )
         return CodeChunk(
             id=str(uuid.uuid4()),
-            text=contextualized,
+            text=text,
+            embedding_text=contextualized,
             file_path=file_path,
             language=language,
             function_name=function_name,
@@ -399,7 +415,7 @@ class CodeChunker:
             line_start=line_start,
             line_end=line_end,
             chunk_type=chunk_type,
-            token_estimate=len(contextualized) // 4,
+            token_estimate=len(text) // 4,
         )
 
     def _add_context_header(

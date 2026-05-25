@@ -2,7 +2,6 @@
 RAG context assembly service.
 Builds structured LLM prompts from search results, repo map, and conversation history.
 Routes queries through intent classification to skip retrieval for non-code messages.
-Uses rolling conversation summaries to maintain long-term memory.
 """
 from config import settings
 from logger import logger
@@ -11,9 +10,6 @@ from storage.metadata_db import db
 from services.search_service import search_service
 from services.llm_service import get_prompt_template
 from services.router_service import router_service
-
-# After this many messages, trigger summarization of older ones
-SUMMARIZE_THRESHOLD = 10
 
 
 def _estimate_tokens(text: str) -> int:
@@ -45,8 +41,7 @@ class RAGService:
 
         1. Classifies intent (code / general / follow_up)
         2. Skips retrieval for non-code queries
-        3. Dynamically allocates token budget
-        4. Injects rolling conversation summary for long-term memory
+        3. Dynamically allocates token budget across repo map, code chunks, history
         """
         if conversation_id and not conversation_history:
             conversation_history = db.get_conversation_history(conversation_id)
@@ -78,9 +73,11 @@ class RAGService:
         elif intent == "follow_up":
             # Enrich follow-up with context from last assistant turn for better retrieval
             enriched = self._enrich_follow_up_query(query, conversation_history)
-            search_results = await search_service.hybrid_search(
-                project_id, enriched
-            )
+            search_results = await search_service.hybrid_search(project_id, enriched)
+
+        # --- Deduplicate overlapping chunks from the same file ---
+        if search_results:
+            search_results = self._dedup_overlapping(search_results)
 
         # --- Dynamic token budget based on intent ---
         total_budget = settings.MAX_CONTEXT_TOKENS
@@ -89,34 +86,22 @@ class RAGService:
         remaining = total_budget - system_fixed - query_fixed
 
         if intent == "general":
-            # No code chunks but still include repo map so the LLM
-            # has structural context and won't hallucinate about the project
+            # No code chunks; small repo map for structural context; big history window
             repo_map_budget = int(remaining * 0.15)
             chunks_budget = 0
-            history_budget = int(remaining * 0.60)
-            summary_budget = int(remaining * 0.15)
+            history_budget = int(remaining * 0.75)
         elif intent == "follow_up":
-            # Some code, more history emphasis
+            # Some code context, heavier history emphasis
             repo_map_budget = int(remaining * 0.10)
-            chunks_budget = int(remaining * 0.25)
-            history_budget = int(remaining * 0.40)
-            summary_budget = int(remaining * 0.15)
+            chunks_budget = int(remaining * 0.30)
+            history_budget = int(remaining * 0.50)
         else:  # "code"
-            # Original allocation, plus summary budget carved from remaining
+            # Prioritise code chunks; modest history
             repo_map_budget = int(remaining * 0.18)
-            chunks_budget = int(remaining * 0.47)
+            chunks_budget = int(remaining * 0.57)
             history_budget = int(remaining * 0.15)
-            summary_budget = int(remaining * 0.10)
-
-        # --- Rolling summary for long-term memory ---
-        summary_block = ""
-        if conversation_id:
-            summary_block = await self._maybe_summarize(
-                conversation_id, conversation_history, summary_budget
-            )
 
         # --- Build system message ---
-        # Always include repo map so the LLM has structural context
         system_msg = self._build_system_message(
             project.name,
             project.repo_map,
@@ -125,15 +110,11 @@ class RAGService:
             intent,
         )
 
-        # --- Build history messages (with summary prepended) ---
-        history_msgs = self._build_history_messages(
-            conversation_history, history_budget, summary_block
-        )
+        # --- Build history messages ---
+        history_msgs = self._build_history_messages(conversation_history, history_budget)
 
         # --- Build user message with code chunks ---
-        user_msg, sources = self._build_user_message(
-            query, search_results, chunks_budget
-        )
+        user_msg, sources = self._build_user_message(query, search_results, chunks_budget)
 
         # --- Assemble final messages list ---
         messages: list[dict[str, str]] = [{"role": "system", "content": system_msg}]
@@ -150,81 +131,6 @@ class RAGService:
         )
 
     # ====================================================================
-    # Summarization
-    # ====================================================================
-
-    async def _maybe_summarize(
-        self,
-        conversation_id: str,
-        history: list[ConversationTurn],
-        summary_budget: int,
-    ) -> str:
-        """
-        Check if conversation needs summarization and return the summary block.
-
-        Summarization triggers when total messages exceed SUMMARIZE_THRESHOLD.
-        Only unsummarized messages get sent to the summarizer.
-        The summary is stored in the DB and reused until more messages arrive.
-        """
-        total_messages = len(history)
-
-        # Load existing summary state
-        existing_summary, summarized_up_to = db.get_conversation_summary(
-            conversation_id
-        )
-
-        if total_messages < SUMMARIZE_THRESHOLD:
-            # Not enough messages to bother summarizing
-            if existing_summary:
-                return _truncate_to_tokens(
-                    f"## Earlier in this conversation\n{existing_summary}",
-                    summary_budget,
-                )
-            return ""
-
-        # Check if we need to re-summarize (new messages since last summary)
-        unsummarized_count = total_messages - summarized_up_to
-        if unsummarized_count >= SUMMARIZE_THRESHOLD // 2 or not existing_summary:
-            # Summarize everything except the most recent 6 messages
-            keep_recent = 6
-            messages_to_summarize = history[: total_messages - keep_recent]
-
-            if messages_to_summarize:
-                msgs_for_llm = [
-                    {"role": m.role, "content": m.content}
-                    for m in messages_to_summarize
-                ]
-
-                # If there's an existing summary, include it as context
-                if existing_summary:
-                    msgs_for_llm.insert(
-                        0,
-                        {
-                            "role": "system",
-                            "content": f"Previous summary: {existing_summary}",
-                        },
-                    )
-
-                new_summary = await router_service.summarize(msgs_for_llm)
-                new_up_to = total_messages - keep_recent
-
-                db.update_conversation_summary(
-                    conversation_id, new_summary, new_up_to
-                )
-                existing_summary = new_summary
-                logger.info(
-                    f"Summarized conversation {conversation_id}: "
-                    f"{new_up_to} messages condensed"
-                )
-
-        if existing_summary:
-            return _truncate_to_tokens(
-                f"## Earlier in this conversation\n{existing_summary}",
-                summary_budget,
-            )
-        return ""
-
-    # ====================================================================
     # Query enrichment
     # ====================================================================
 
@@ -236,22 +142,81 @@ class RAGService:
         """Enrich a follow-up query with context from the last assistant turn.
 
         Follow-up queries like "explain that function" have weak semantic signal.
-        Appending context from the previous response (which contains file paths,
-        function names, and technical terms) gives the embedding model a much
-        better chance of finding the right code.
+        Appending context from the previous response (file paths, function names,
+        technical terms) gives the embedding model a much better chance of finding
+        the right code.
         """
-        if len(history) < 2:
+        if not history:
             return query
 
-        # Skip the current query (last in history) and find previous assistant response
-        prev_turns = history[:-1]
-        for turn in reversed(prev_turns):
+        for turn in reversed(history):
             if turn.role == "assistant":
-                # Take first ~300 chars of the response for search grounding
                 context = turn.content[:300]
                 return f"{query}\n\nContext: {context}"
 
         return query
+
+    # ====================================================================
+    # Deduplication
+    # ====================================================================
+
+    def _dedup_overlapping(self, results: list) -> list:
+        """Merge search results from the same file with overlapping or adjacent line ranges.
+
+        When a large function is split into multiple chunks, both halves often
+        get retrieved (similar embeddings). This merges them into a single result
+        so the LLM sees one continuous block instead of duplicated fragments.
+        """
+        from collections import defaultdict
+
+        by_file: dict[str, list] = defaultdict(list)
+        for r in results:
+            by_file[r.file_path].append(r)
+
+        merged: list = []
+        for file_results in by_file.values():
+            file_results.sort(key=lambda r: r.line_start)
+
+            current = file_results[0]
+            for next_r in file_results[1:]:
+                # Overlap or adjacent (within 3 lines)
+                if next_r.line_start <= current.line_end + 3:
+                    current = self._merge_results(current, next_r)
+                else:
+                    merged.append(current)
+                    current = next_r
+            merged.append(current)
+
+        merged.sort(key=lambda r: r.relevance_score, reverse=True)
+        return merged
+
+    def _merge_results(self, a, b):
+        """Merge two overlapping SearchResult objects into one."""
+        a_lines = a.text.split("\n")
+        b_lines = b.text.split("\n")
+
+        overlap_start = b.line_start - a.line_start
+        if overlap_start < len(a_lines):
+            b_offset = a.line_end - b.line_start + 1
+            if b_offset < len(b_lines):
+                merged_text = a.text + "\n" + "\n".join(b_lines[b_offset:])
+            else:
+                merged_text = a.text
+        else:
+            merged_text = a.text + "\n" + b.text
+
+        return type(a)(
+            chunk_id=a.chunk_id,
+            text=merged_text,
+            file_path=a.file_path,
+            language=a.language,
+            function_name=a.function_name or b.function_name,
+            class_name=a.class_name or b.class_name,
+            line_start=min(a.line_start, b.line_start),
+            line_end=max(a.line_end, b.line_end),
+            chunk_type=a.chunk_type,
+            relevance_score=max(a.relevance_score, b.relevance_score),
+        )
 
     # ====================================================================
     # Builders
@@ -266,14 +231,16 @@ class RAGService:
         intent: str = "code",
     ) -> str:
         """Build the system prompt, adapting to query intent."""
-        parts = [get_prompt_template(template, project_name)]
-
-        if intent in ("general", "follow_up"):
+        if intent == "general":
+            parts = [get_prompt_template("general", project_name)]
+        elif intent == "follow_up":
+            parts = [get_prompt_template(template, project_name)]
             parts.append(
-                "\nThe user may be having a general conversation or following up "
-                "on a previous topic. Respond naturally. You don't need to reference "
-                "code unless it's relevant to what they're asking."
+                "\nThe user is following up on a previous topic. Use conversation "
+                "history to understand context. Reference code if relevant."
             )
+        else:
+            parts = [get_prompt_template(template, project_name)]
 
         if repo_map:
             truncated_map = _truncate_to_tokens(repo_map, repo_map_budget)
@@ -287,30 +254,16 @@ class RAGService:
         self,
         history: list[ConversationTurn],
         budget: int,
-        summary_block: str = "",
     ) -> list[dict[str, str]]:
-        """
-        Build history messages with optional summary prepended.
+        """Build history messages within token budget, prioritising recent turns."""
+        if not history:
+            return []
 
-        If a summary exists, it's injected as a system message before
-        the recent conversation turns.
-        """
         msgs: list[dict[str, str]] = []
         tokens_used = 0
 
-        # Inject summary as context
-        if summary_block:
-            summary_tokens = _estimate_tokens(summary_block)
-            if summary_tokens < budget:
-                msgs.append({"role": "system", "content": summary_block})
-                tokens_used += summary_tokens
-
-        if not history:
-            return msgs
-
-        # Walk backwards (newest first) to prioritize recent context
+        # Walk backwards (newest first) to keep recent context
         selected: list[dict[str, str]] = []
-
         for turn in reversed(history):
             turn_tokens = _estimate_tokens(turn.content)
             if tokens_used + turn_tokens > budget:

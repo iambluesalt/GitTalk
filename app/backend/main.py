@@ -1,6 +1,10 @@
 """
 GitTalk Backend - FastAPI Application
 Main entry point for the backend API server.
+
+Run the dev server (auto-reload on file changes):
+    cd app/backend
+    uvicorn main:app --reload --host localhost --port 8000
 """
 import shutil
 
@@ -211,15 +215,3 @@ app.include_router(projects_router, prefix=settings.API_PREFIX, tags=["Projects"
 app.include_router(index_router, prefix=settings.API_PREFIX, tags=["Indexing"])
 app.include_router(chat_router, prefix=settings.API_PREFIX, tags=["Chat"])
 app.include_router(system_router, prefix=settings.API_PREFIX, tags=["System"])
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "main:app",
-        host="localhost",
-        port=8000,
-        reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
-    )

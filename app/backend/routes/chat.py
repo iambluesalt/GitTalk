@@ -72,11 +72,12 @@ async def chat(request: ChatRequest):
                 return
 
             # --- Resolve or create conversation ---
+            is_new_conversation = not request.conversation_id
             conversation_id = request.conversation_id
             if not conversation_id:
                 conversation_id = db.create_conversation(
                     request.project_id,
-                    title=request.message[:80],
+                    title=request.message[:80],  # placeholder; replaced by LLM title below
                 )
 
             # Verify conversation exists (if user-provided)
@@ -128,14 +129,22 @@ async def chat(request: ChatRequest):
                 response_time_ms=elapsed_ms,
             )
 
+            # --- Generate conversation title for new chats (fast model) ---
+            conversation_title: str | None = None
+            if is_new_conversation:
+                conversation_title = await llm_service.generate_title(request.message)
+                db.update_conversation_title(conversation_id, conversation_title)
+                logger.debug(f"Generated title: {conversation_title!r}")
+
             # --- Done event ---
-            yield SSEEvent(
-                event="done",
-                data={
-                    "conversation_id": conversation_id,
-                    "response_time_ms": round(elapsed_ms, 1),
-                },
-            ).format()
+            done_data: dict = {
+                "conversation_id": conversation_id,
+                "response_time_ms": round(elapsed_ms, 1),
+            }
+            if conversation_title:
+                done_data["conversation_title"] = conversation_title
+
+            yield SSEEvent(event="done", data=done_data).format()
 
         except Exception as e:
             logger.error(f"Chat stream error: {e}", exc_info=True)

@@ -1,0 +1,643 @@
+{
+  "benchmark_date": "2026-05-25 16:19:18",
+  "iterations": {
+    "regex": 30000,
+    "llm": 3
+  },
+  "llm_model": "llama3.2:1b",
+  "llm_available": true,
+  "cases": [
+    {
+      "label": "greeting",
+      "message": "hi",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 0.5144
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 0.7639
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 869.91
+      }
+    },
+    {
+      "label": "thanks",
+      "message": "thanks",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 0.9024
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 1.0569
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 846.97
+      }
+    },
+    {
+      "label": "acknowledgement",
+      "message": "ok got it",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 2.2701
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 3.2254
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 866.4
+      }
+    },
+    {
+      "label": "affirmation",
+      "message": "makes sense",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 1.0653
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 1.3911
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 846.65
+      }
+    },
+    {
+      "label": "farewell",
+      "message": "bye",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 1.7849
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 2.0106
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 849.72
+      }
+    },
+    {
+      "label": "laughter",
+      "message": "lol",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 2.1458
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 2.3812
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 858.16
+      }
+    },
+    {
+      "label": "pleasantry",
+      "message": "how are you?",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 1.6531
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 2.0893
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 844.0
+      }
+    },
+    {
+      "label": "ambiguous 1",
+      "message": "interesting, what else?",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 2.3916
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 3.3755
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 848.92
+      }
+    },
+    {
+      "label": "ambiguous 2",
+      "message": "that's helpful",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 2.3535
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 3.4404
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 861.69
+      }
+    },
+    {
+      "label": "ambiguous 3",
+      "message": "noted, thanks",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 2.158
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 3.2146
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 861.68
+      }
+    },
+    {
+      "label": "ambiguous 4",
+      "message": "fair enough",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 2.2765
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 2.9626
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 870.43
+      }
+    },
+    {
+      "label": "ambiguous 5",
+      "message": "yep, got it",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 2.1896
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 3.3858
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 849.15
+      }
+    },
+    {
+      "label": "ambiguous 6",
+      "message": "right, makes sense",
+      "has_history": false,
+      "expected": "general",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 2.2333
+      },
+      "new": {
+        "result": "general",
+        "correct": true,
+        "avg_us": 3.2491
+      },
+      "llm": {
+        "result": "general",
+        "correct": true,
+        "avg_ms": 869.05
+      }
+    },
+    {
+      "label": "follow-up classic",
+      "message": "explain that",
+      "has_history": true,
+      "expected": "follow_up",
+      "old": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 3.091
+      },
+      "new": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 4.0298
+      },
+      "llm": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_ms": 921.06
+      }
+    },
+    {
+      "label": "follow-up detail",
+      "message": "tell me more",
+      "has_history": true,
+      "expected": "follow_up",
+      "old": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 2.6086
+      },
+      "new": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 3.6085
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 863.51
+      }
+    },
+    {
+      "label": "follow-up clarify",
+      "message": "what do you mean?",
+      "has_history": true,
+      "expected": "follow_up",
+      "old": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 3.6778
+      },
+      "new": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 4.6568
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 861.76
+      }
+    },
+    {
+      "label": "follow-up example",
+      "message": "give me an example",
+      "has_history": true,
+      "expected": "follow_up",
+      "old": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 6.1248
+      },
+      "new": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 7.4979
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 859.69
+      }
+    },
+    {
+      "label": "follow-up short",
+      "message": "and the constructor?",
+      "has_history": true,
+      "expected": "follow_up",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 6.1041
+      },
+      "new": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 7.5733
+      },
+      "llm": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_ms": 892.28
+      }
+    },
+    {
+      "label": "follow-up pronoun",
+      "message": "and how does that work?",
+      "has_history": true,
+      "expected": "follow_up",
+      "old": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 5.4354
+      },
+      "new": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 6.389
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 872.39
+      }
+    },
+    {
+      "label": "follow-up why",
+      "message": "why so?",
+      "has_history": true,
+      "expected": "follow_up",
+      "old": {
+        "result": "code",
+        "correct": false,
+        "avg_us": 4.3733
+      },
+      "new": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_us": 7.105
+      },
+      "llm": {
+        "result": "follow_up",
+        "correct": true,
+        "avg_ms": 914.8
+      }
+    },
+    {
+      "label": "kw beats follow-up 1",
+      "message": "what does that function return?",
+      "has_history": true,
+      "expected": "code",
+      "old": {
+        "result": "follow_up",
+        "correct": false,
+        "avg_us": 3.999
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 3.7865
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 859.5
+      }
+    },
+    {
+      "label": "kw beats follow-up 2",
+      "message": "explain the constructor method",
+      "has_history": true,
+      "expected": "code",
+      "old": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 7.1391
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 3.6704
+      },
+      "llm": {
+        "result": "follow_up",
+        "correct": false,
+        "avg_ms": 923.9
+      }
+    },
+    {
+      "label": "kw beats follow-up 3",
+      "message": "what does that error mean exactly",
+      "has_history": true,
+      "expected": "code",
+      "old": {
+        "result": "follow_up",
+        "correct": false,
+        "avg_us": 4.4118
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 4.0754
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 903.18
+      }
+    },
+    {
+      "label": "code plain",
+      "message": "how does authentication work?",
+      "has_history": false,
+      "expected": "code",
+      "old": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 2.555
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 3.8258
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 860.26
+      }
+    },
+    {
+      "label": "code keyword",
+      "message": "what does the main function return?",
+      "has_history": false,
+      "expected": "code",
+      "old": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 2.9006
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 4.0551
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 876.76
+      }
+    },
+    {
+      "label": "code error",
+      "message": "where is error handling done?",
+      "has_history": false,
+      "expected": "code",
+      "old": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 2.4899
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 3.8462
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 860.67
+      }
+    },
+    {
+      "label": "code schema",
+      "message": "what is the database schema?",
+      "has_history": false,
+      "expected": "code",
+      "old": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 2.395
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 3.7614
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 876.8
+      }
+    },
+    {
+      "label": "code api",
+      "message": "how is the api endpoint structured?",
+      "has_history": false,
+      "expected": "code",
+      "old": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 2.792
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 3.9378
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 878.79
+      }
+    },
+    {
+      "label": "code long",
+      "message": "can you show me how the token refresh logic works in the auth service?",
+      "has_history": false,
+      "expected": "code",
+      "old": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 3.2164
+      },
+      "new": {
+        "result": "code",
+        "correct": true,
+        "avg_us": 4.8183
+      },
+      "llm": {
+        "result": "general",
+        "correct": false,
+        "avg_ms": 877.33
+      }
+    }
+  ],
+  "summary": {
+    "total_cases": 29,
+    "old": {
+      "correct": 18,
+      "wrong": 11,
+      "total_us": 87.2519,
+      "avg_us": 3.0087
+    },
+    "new": {
+      "correct": 29,
+      "wrong": 0,
+      "total_us": 109.1837,
+      "avg_us": 3.765
+    },
+    "llm": {
+      "correct": 16,
+      "wrong": 13,
+      "total_ms": 25245.41,
+      "avg_ms": 870.53,
+      "skipped": false
+    },
+    "embedding_calls_saved_by_new_vs_old": 7
+  }
+}

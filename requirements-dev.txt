@@ -1,0 +1,8 @@
+# Test dependencies — install alongside requirements.txt
+# pip install -r requirements.txt -r requirements-dev.txt
+
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-httpx>=0.30.0          # mock httpx calls
+respx>=0.21.0                  # alternative httpx mocker (used for streaming)
+httpx>=0.28.0                  # needed by pytest-httpx

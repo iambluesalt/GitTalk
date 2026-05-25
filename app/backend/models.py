@@ -53,7 +53,6 @@ class ConfigUpdate(BaseModel):
     ollama_base_url: Optional[str] = None
     ollama_model: Optional[str] = None
     ollama_embed_model: Optional[str] = None
-    router_model: Optional[str] = None
     ollama_timeout: Optional[int] = Field(None, ge=10, le=600)
     cloud_api_provider: Optional[str] = None
     cloud_api_key: Optional[str] = None

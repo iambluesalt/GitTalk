@@ -18,7 +18,6 @@ from logger import logger
 PROMPT_TEMPLATES: dict[str, str] = {
     "code_qa": (
         "You are a knowledgeable code assistant for the '{project_name}' repository.\n"
-
         "Answer questions about the codebase using ONLY the provided code context below.\n\n"
         "Rules:\n"
         "- Base your answer on the code snippets provided under '## Relevant Code'. "
@@ -31,26 +30,12 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "- Do NOT make up code or file paths that aren't in the provided context.\n"
         "- Be concise but thorough. Explain the 'why' not just the 'what'."
     ),
-    "bug_detection": (
-        "You are an expert code reviewer for the '{project_name}' repository.\n"
-        "Analyze the provided code snippets for potential bugs, edge cases, and issues.\n"
-        "For each issue found:\n"
-        "1. State the bug clearly\n"
-        "2. Reference the exact location (file:line)\n"
-        "3. Explain why it's a problem\n"
-        "4. Suggest a concrete fix with code"
-    ),
-    "code_navigation": (
-        "You are a code navigation assistant for the '{project_name}' repository.\n"
-        "Help the user understand how different parts of the codebase connect.\n"
-        "Trace data flow, call chains, and dependencies using the provided code context.\n"
-        "Always reference specific files and line numbers from the provided snippets."
-    ),
-    "code_explanation": (
-        "You are a patient code explainer for the '{project_name}' repository.\n"
-        "Break down the provided code into clear, understandable parts.\n"
-        "Explain what each section does, why it exists, and how it fits "
-        "into the larger system. Reference the specific file and line numbers."
+    "general": (
+        "You are a friendly assistant for the '{project_name}' repository.\n"
+        "The user is having a casual conversation, asking a general knowledge question, "
+        "or making small talk. Respond naturally and conversationally.\n"
+        "You have access to the repository structure below for reference, "
+        "but only mention it if the user's question is related."
     ),
 }
 
@@ -129,6 +114,43 @@ class LLMService:
             # Ollama fallback
             async for token in self._stream_ollama(messages):
                 yield token
+
+    async def generate_title(self, user_message: str) -> str:
+        """
+        Generate a short conversation title using the fast Ollama model.
+
+        Uses a non-streaming /api/generate call so the result is available
+        immediately after the main response stream finishes. Falls back
+        gracefully to the first 60 chars of the user message if the fast
+        model is unavailable or the call times out.
+        """
+        prompt = (
+            "Generate a concise 4-7 word title for this conversation.\n"
+            f"User message: {user_message[:300]}\n\n"
+            "Reply with ONLY the title — no quotes, no punctuation at the end, no explanation."
+        )
+        try:
+            payload = {
+                "model": settings.OLLAMA_FAST_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3, "num_predict": 20},
+            }
+            timeout = httpx.Timeout(10.0, connect=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{settings.OLLAMA_BASE_URL}/api/generate",
+                    json=payload,
+                )
+                resp.raise_for_status()
+                title = resp.json().get("response", "").strip().strip("\"'").strip()
+                if title and len(title) <= 80:
+                    return title
+        except Exception as e:
+            logger.debug(f"Title generation failed ({settings.OLLAMA_FAST_MODEL}): {e}")
+
+        # Fallback: truncate the user message
+        return user_message[:60].rstrip()
 
     async def check_availability(self) -> dict[str, bool]:
         """Check which LLM providers are reachable."""

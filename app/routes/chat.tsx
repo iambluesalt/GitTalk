@@ -248,6 +248,15 @@ export default function Chat() {
               }
               return next;
             });
+            // Optimistically update sidebar title if the server generated one
+            if (msg.data.conversation_title && newConvId) {
+              const generatedTitle = msg.data.conversation_title as string;
+              setConversations((prev) =>
+                prev.map((c) =>
+                  c.id === newConvId ? { ...c, title: generatedTitle } : c
+                )
+              );
+            }
             break;
 
           case "error": {

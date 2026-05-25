@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Ollama (Primary)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5-coder:7b"
+    OLLAMA_FAST_MODEL: str = "llama3.2:1b"  # Lightweight model for quick tasks (title gen, etc.)
     OLLAMA_TIMEOUT: int = 120
 
     # Cloud API (Primary in hybrid mode)
@@ -47,9 +48,6 @@ class Settings(BaseSettings):
     CLOUD_API_BASE_URL: str | None = None
     CLOUD_MODEL: str | None = None
     CLOUD_TIMEOUT: int = 120
-
-    # Router (small/fast model for query classification & summarization)
-    ROUTER_MODEL: str = "lfm2.5-thinking:latest"
 
     # Embeddings
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
@@ -61,12 +59,14 @@ class Settings(BaseSettings):
     MAX_SEARCH_RESULTS: int = 8
     CHUNK_MAX_TOKENS: int = 1000
     RETRIEVAL_CANDIDATES: int = 30
-    MIN_RELEVANCE_SCORE: float = 0.15
+    # NOTE: RRF scores are min-max normalised, so 0.15 filters ~bottom 15% by
+    # relative rank — not absolute relevance. Keep at 0 to use n_results as the
+    # only hard cutoff, or raise to 0.05–0.10 to drop the weakest tail.
+    MIN_RELEVANCE_SCORE: float = 0.0
     CHUNK_OVERLAP_LINES: int = 3
 
     # Performance
-    INDEXING_WORKERS: int = 4
-    CACHE_TTL_HOURS: int = 24
+    INDEXING_WORKERS: int = 4  # NOTE: indexing pipeline is currently sequential; reserved for future parallelism
 
     # API
     API_PREFIX: str = "/api"

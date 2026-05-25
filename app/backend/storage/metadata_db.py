@@ -690,6 +690,16 @@ class MetadataDB:
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def update_conversation_title(self, conversation_id: str, title: str) -> bool:
+        """Update the title of an existing conversation."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (title, datetime.now(), conversation_id),
+            )
+            return cursor.rowcount > 0
+
     def delete_conversation(self, conversation_id: str) -> bool:
         """Delete a conversation and its messages."""
         with self.get_connection() as conn:

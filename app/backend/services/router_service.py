@@ -1,161 +1,157 @@
 """
 Query router service — classifies user messages to decide whether code retrieval is needed.
-Uses a small/fast LLM (e.g. lfm2.5-thinking) via Ollama for accurate intent classification.
+Uses fast heuristics; no LLM call needed per query.
+
+Classification tiers (evaluated in order, first match wins):
+  1. Tiny messages with no code keywords → "general"  (length guard, O(1))
+  2. General/conversational regex patterns → "general"
+  3. Code keyword fast-path → "code"                  (skip follow-up check)
+  4. Follow-up regex patterns (only when history exists) → "follow_up"
+  5. Default → "code"
+
+The default is always "code" — it's safe to search unnecessarily, but it
+costs ~100ms for the embedding call, so we try to avoid it for messages that
+are clearly conversational.
 """
-import json
 import re
 
-import httpx
-
-from config import settings
 from logger import logger
 
 
-CLASSIFY_PROMPT = """Classify this chat message into ONE category. The chat is about a code repository.
+# ============================================================================
+# Fast-path sets (O(1) lookup before running any regex)
+# ============================================================================
 
-Categories:
-- "code": asks about code, files, functions, bugs, the project/repo itself, its purpose, architecture, dependencies, or ANYTHING that needs codebase context to answer properly
-- "follow_up": continues or clarifies a previous topic from the conversation (e.g. "explain that again", "what about X part", "tell me more", "can you simplify that")
-- "general": ONLY casual talk, greetings, thanks, or general knowledge questions completely unrelated to THIS codebase
+# If a message contains any of these words it is almost certainly about code.
+# Checked before follow-up patterns so a message like "what does that function
+# do?" doesn't get misclassified as follow_up.
+_CODE_KEYWORDS = frozenset({
+    "function", "method", "class", "module", "file", "import", "export",
+    "variable", "constant", "type", "interface", "struct", "enum", "trait",
+    "error", "exception", "bug", "fix", "test", "api", "endpoint", "route",
+    "database", "query", "schema", "model", "service", "config", "env",
+    "dependency", "package", "library", "framework", "component", "hook",
+    "middleware", "decorator", "annotation", "async", "await", "callback",
+    "loop", "recursion", "algorithm", "data structure", "implement", "return",
+    "parameter", "argument", "constructor", "inherit", "override", "abstract",
+    "static", "public", "private", "protected", "main", "init", "setup",
+    "deploy", "build", "compile", "lint", "format", "parse", "serialize",
+    "authenticate", "authorize", "token", "session", "cache", "queue",
+    # Common derived forms that appear in natural queries
+    "authentication", "authorization", "configuration", "implementation",
+    "endpoints", "routes", "components", "handlers", "middleware",
+    "functions", "methods", "classes", "modules", "variables", "constants",
+    "errors", "exceptions", "tests", "models", "services", "schemas",
+})
 
-If in doubt, choose "code". Questions like "what is this project", "what does this repo do", "how is this structured" are ALWAYS "code".
+# ============================================================================
+# Regex patterns
+# ============================================================================
 
-Recent conversation:
-{history_snippet}
+# Follow-up signals: user is continuing or clarifying a previous topic
+_FOLLOW_UP_PATTERNS = [
+    r"\b(tell me more|elaborate|continue|go on|keep going)\b",
+    r"\bexplain (that|this|it|above|more|further)\b",
+    r"\bwhat (about|does that|do you mean(?: by that)?|did you mean)\b",
+    r"\b(can you|could you)\s+(clarify|expand|simplify|rephrase|reword)\b",
+    r"\bmore (details?|info|information|context|examples?)\b",
+    r"\bhow (so|does that work|come)\b",
+    r"\bi (don'?t|still don'?t|didn'?t) (understand|get it|follow)\b",
+    r"\bwhat'?s (that|this) mean\b",
+    r"\bgive me an? example\b",
+    # Short pronoun-anchored follow-ups ("and the X?", "what about X?")
+    r"^and (the|that|this|those|these|its|their)\b",
+    r"\bshow (that|it|this) again\b",
+    r"\band how does that\b",
+    r"\b(so|and) (why|how|what|when|where) (is|does|did|was|are|were) (that|this|it)\b",
+    r"\b(why|how) (so|is that|does that|would that)\b",
+]
 
-Message: {message}
+# General/conversational signals: no codebase context needed at all
+_GENERAL_PATTERNS = [
+    r"^(hi+|hello+|hey+|howdy|sup|yo|greetings)\W*$",
+    r"^(thanks?|thank you|ty|thx|cheers)\W*$",
+    r"^(ok+|okay|got it|i see|understood|makes sense|sounds good|cool|nice|great|awesome|perfect|sure|alright)\W*$",
+    r"^(good (morning|afternoon|evening|night|day))\W*$",
+    r"\b(how are you|what'?s up|how'?s it going|how'?s your day)\b",
+    r"^(bye|goodbye|see you|later|cya)\W*$",
+    r"^(lol|lmao|haha|hehe)\W*$",
+    # Short acknowledgements not caught by the anchored patterns above
+    r"^(interesting|noted|fair enough|makes sense|right|yep|nope|yup|nah)\W*$",
+    r"^(that('?s| is) (helpful|great|clear|perfect|good|interesting))\W*$",
+]
 
-Reply with ONLY: {{"intent": "<category>"}}"""
-
-SUMMARIZE_PROMPT = """Summarize this conversation concisely. Preserve:
-- Key topics discussed (specific files, functions, concepts)
-- Decisions or conclusions reached
-- Any user preferences or corrections mentioned
-
-Keep it under 300 words. Write in third person ("The user asked about...", "The assistant explained...").
-
-Conversation:
-{conversation}"""
+# Max word count for the length guard. Messages this short with no code
+# keywords are almost certainly conversational. Avoids running all the regex.
+# Kept at 3 so 4-word queries like "how does X work?" are NOT short-circuited
+# — they fall through to the full regex + keyword tiers instead.
+_SHORT_MSG_WORD_LIMIT = 3
 
 
 class RouterService:
-    """Classifies queries and summarizes conversations using a small local LLM."""
+    """Classifies queries using fast heuristics — no per-query LLM call."""
 
     async def classify(
         self,
         message: str,
-        recent_history: list[dict[str, str]] | None = None,
+        recent_history: list[dict] | None = None,
     ) -> str:
         """
         Classify a user message intent.
 
         Returns: "code", "general", or "follow_up"
+        Default is "code" — always search if uncertain.
         """
-        # Build a short history snippet (last 2 messages) for context
-        history_snippet = "None"
-        if recent_history:
-            last_two = recent_history[-2:]
-            lines = [f"{m['role']}: {m['content'][:150]}" for m in last_two]
-            history_snippet = "\n".join(lines)
+        msg = message.lower().strip()
+        has_history = bool(recent_history)
+        words = msg.split()
 
-        prompt = CLASSIFY_PROMPT.format(
-            history_snippet=history_snippet,
-            message=message,
-        )
+        # ── Tier 1: length guard ─────────────────────────────────────────────
+        # Very short messages with zero code keywords are conversational.
+        # This saves all subsequent regex work for the common "ok / thanks /
+        # got it" cases that appear between real code questions.
+        if len(words) <= _SHORT_MSG_WORD_LIMIT:
+            has_code_kw = any(w in _CODE_KEYWORDS for w in words)
+            if not has_code_kw:
+                # Still run general patterns to confirm (they're anchored, fast)
+                for pattern in _GENERAL_PATTERNS:
+                    if re.search(pattern, msg):
+                        logger.debug(f"Intent: general (short+pattern) | {message[:60]}")
+                        return "general"
+                # Short, no code keywords, no strong follow-up signal → general
+                # UNLESS there's history and it looks like a follow-up
+                if has_history:
+                    for pattern in _FOLLOW_UP_PATTERNS:
+                        if re.search(pattern, msg):
+                            logger.debug(f"Intent: follow_up (short) | {message[:60]}")
+                            return "follow_up"
+                # Short message, no code keywords, no follow-up pattern → general
+                logger.debug(f"Intent: general (short, no code kw) | {message[:60]}")
+                return "general"
 
-        try:
-            raw = await self._call_small_llm(prompt, max_tokens=50)
-            return self._parse_intent(raw)
-        except Exception as e:
-            logger.warning(f"Router classification failed, defaulting to 'code': {e}")
-            return "code"  # Safe fallback — always search if unsure
+        # ── Tier 2: general pattern match (longer messages) ──────────────────
+        for pattern in _GENERAL_PATTERNS:
+            if re.search(pattern, msg):
+                logger.debug(f"Intent: general | {message[:60]}")
+                return "general"
 
-    async def summarize(
-        self,
-        messages: list[dict[str, str]],
-    ) -> str:
-        """
-        Summarize a list of conversation messages into a compact paragraph.
-
-        Args:
-            messages: List of {role, content} dicts to summarize.
-
-        Returns:
-            A concise summary string.
-        """
-        conversation = "\n".join(
-            f"{m['role'].title()}: {m['content']}" for m in messages
-        )
-        prompt = SUMMARIZE_PROMPT.format(conversation=conversation)
-
-        try:
-            summary = await self._call_small_llm(prompt, max_tokens=500)
-            return summary.strip()
-        except Exception as e:
-            logger.error(f"Summarization failed: {e}")
-            # Fallback: just keep the last few messages as-is
-            fallback_lines = []
-            for m in messages[-4:]:
-                fallback_lines.append(f"{m['role']}: {m['content'][:100]}")
-            return "\n".join(fallback_lines)
-
-    # ====================================================================
-    # Internals
-    # ====================================================================
-
-    async def _call_small_llm(self, prompt: str, max_tokens: int = 200) -> str:
-        """Call the small router model via Ollama /api/generate."""
-        url = f"{settings.OLLAMA_BASE_URL}/api/generate"
-        # Thinking models need extra tokens for their <think> reasoning
-        predict_tokens = max_tokens + 300
-        payload = {
-            "model": settings.ROUTER_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "num_predict": predict_tokens,
-                "temperature": 0.1,  # Low temp for deterministic classification
-            },
-        }
-
-        timeout = httpx.Timeout(30.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            raw = data.get("response", "")
-            return self._strip_thinking(raw)
-
-    def _strip_thinking(self, text: str) -> str:
-        """Strip <think>...</think> blocks from thinking-model output."""
-        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        return cleaned.strip()
-
-    def _parse_intent(self, raw: str) -> str:
-        """Extract intent from LLM response, handling various formats."""
-        text = raw.strip().lower()
-
-        # Try JSON parse first
-        try:
-            # Find JSON object in response (model might wrap it in markdown etc.)
-            json_match = re.search(r'\{[^}]+\}', text)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                intent = parsed.get("intent", "").strip().lower()
-                if intent in ("code", "general", "follow_up"):
-                    return intent
-        except (json.JSONDecodeError, AttributeError):
-            pass
-
-        # Fallback: look for keywords in raw text
-        if "general" in text:
-            return "general"
-        if "follow_up" in text or "follow-up" in text:
-            return "follow_up"
-        if "code" in text:
+        # ── Tier 3: code keyword fast-path ───────────────────────────────────
+        # If a known code term appears, skip the follow-up check entirely.
+        # "what does that function return?" has "function" → code, not follow_up.
+        if any(w in _CODE_KEYWORDS for w in words):
+            logger.debug(f"Intent: code (keyword) | {message[:60]}")
             return "code"
 
-        return "code"  # Default to code (safe — always search)
+        # ── Tier 4: follow-up pattern match ──────────────────────────────────
+        if has_history:
+            for pattern in _FOLLOW_UP_PATTERNS:
+                if re.search(pattern, msg):
+                    logger.debug(f"Intent: follow_up | {message[:60]}")
+                    return "follow_up"
+
+        # ── Tier 5: default ──────────────────────────────────────────────────
+        logger.debug(f"Intent: code (default) | {message[:60]}")
+        return "code"
 
 
 # Global instance
