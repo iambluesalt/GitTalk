@@ -2,10 +2,12 @@
 LLM integration service backed by LangChain chat models.
 Routes between Ollama (local) and Groq (cloud) with automatic fallback.
 """
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Sequence
 
 import httpx
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import Runnable
 from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 
@@ -18,19 +20,23 @@ from logger import logger
 # ============================================================================
 
 PROMPT_TEMPLATES: dict[str, str] = {
-    "code_qa": (
+    "code_agent": (
         "You are a knowledgeable code assistant for the '{project_name}' repository.\n"
-        "Answer questions about the codebase using ONLY the provided code context below.\n\n"
+        "You have tools that let you explore the repository yourself — use them before "
+        "answering anything about the code.\n\n"
+        "Tools:\n"
+        "- `search_codebase` — semantic + keyword search over the indexed code. Start here.\n"
+        "- `read_file` — read exact file contents when a snippet is truncated or you need "
+        "the surrounding code.\n"
+        "- `list_files` — list a directory when you need to find where something lives.\n\n"
         "Rules:\n"
-        "- Base your answer on the code snippets provided under '## Relevant Code'. "
-        "Each snippet is numbered [1], [2], etc. with its file path and line range.\n"
-        "- When referencing code, ALWAYS cite the source: mention the file path and line numbers "
-        "(e.g. `src/auth.py:42-58`).\n"
-        "- If you quote code, use fenced code blocks with the correct language.\n"
-        "- If the provided context does NOT contain enough information to fully answer, "
-        "say so explicitly and explain what would be needed.\n"
-        "- Do NOT make up code or file paths that aren't in the provided context.\n"
-        "- Be concise but thorough. Explain the 'why' not just the 'what'."
+        "- Search before you answer. If the first search isn't enough, search again with "
+        "different wording or read the relevant file — several tool calls per question is normal.\n"
+        "- ALWAYS cite what you used: file path and line numbers (e.g. `src/auth.py:42-58`).\n"
+        "- Never invent code, file paths, or APIs you haven't seen through a tool.\n"
+        "- If the repository genuinely doesn't contain the answer, say so explicitly and "
+        "explain what would be needed.\n"
+        "- Be concise but thorough. Explain the 'why', not just the 'what'."
     ),
     "general": (
         "You are a friendly assistant for the '{project_name}' repository.\n"
@@ -44,7 +50,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
 
 def get_prompt_template(template_name: str, project_name: str = "unknown") -> str:
     """Get a system prompt by template name with project name substituted."""
-    template = PROMPT_TEMPLATES.get(template_name, PROMPT_TEMPLATES["code_qa"])
+    template = PROMPT_TEMPLATES.get(template_name, PROMPT_TEMPLATES["code_agent"])
     return template.format(project_name=project_name)
 
 
@@ -111,13 +117,19 @@ class LLMService:
             return "ollama", model_str[7:]
         return None, model_str
 
-    def get_chat_model(self, model_override: str | None = None) -> BaseChatModel:
+    def get_chat_model(
+        self,
+        model_override: str | None = None,
+        tools: Sequence[Any] | None = None,
+    ) -> Runnable[Any, BaseMessage]:
         """
         Build the chat model for this request.
 
         Args:
             model_override: Optional 'provider:model' string (e.g. 'cloud:gemini-2.5-flash-lite').
                             Overrides LLM_PROVIDER and model for this request.
+            tools: Optional tools to bind. Bound to each provider *before* fallbacks
+                   are composed — `RunnableWithFallbacks` has no `bind_tools`.
 
         Hybrid mode returns Groq with an Ollama fallback attached — LangChain only
         falls back if the primary fails before yielding its first chunk, which
@@ -126,15 +138,18 @@ class LLMService:
         override_provider, override_model = self.parse_model_override(model_override)
         provider = override_provider or settings.LLM_PROVIDER
 
+        def bind(model: BaseChatModel) -> Runnable[Any, BaseMessage]:
+            return model.bind_tools(tools) if tools else model
+
         if provider == "ollama":
-            return self._make_ollama(model=override_model)
+            return bind(self._make_ollama(model=override_model))
         if provider == "cloud":
-            return self._make_groq(model=override_model)
+            return bind(self._make_groq(model=override_model))
 
         # hybrid: cloud first (fast), Ollama as fallback
         if self._cloud_configured():
-            return self._make_groq().with_fallbacks([self._make_ollama()])
-        return self._make_ollama()
+            return bind(self._make_groq()).with_fallbacks([bind(self._make_ollama())])
+        return bind(self._make_ollama())
 
     async def stream_chat(
         self,

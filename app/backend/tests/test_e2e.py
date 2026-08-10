@@ -95,7 +95,6 @@ async def e2e_app(tmp_path):
     from storage.vector_db import VectorDB
     import services.indexing_service as idx_svc
     import services.search_service as search_svc
-    import services.rag_service as rag_svc
     import routes.clone as clone_rt
     import routes.index as index_rt
     import routes.chat as chat_rt
@@ -106,7 +105,7 @@ async def e2e_app(tmp_path):
     real_vdb = VectorDB(persist_directory=tmp_path / "e2e_lancedb")
 
     # Patch every module that imports db / vector_db at module level
-    for mod in (idx_svc, search_svc, rag_svc, clone_rt,
+    for mod in (idx_svc, search_svc, clone_rt,
                 index_rt, chat_rt, proj_rt, sys_rt):
         if hasattr(mod, "db"):
             mod.db = real_db

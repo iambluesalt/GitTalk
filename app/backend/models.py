@@ -158,14 +158,6 @@ class SearchResult(BaseModel):
     relevance_score: float = 0.0
 
 
-class RAGContext(BaseModel):
-    """Assembled context ready for LLM consumption."""
-    messages: list[dict[str, str]]
-    sources: list[CodeReference]
-    token_count: int
-    search_results_count: int
-
-
 class ConversationTurn(BaseModel):
     """A single turn in conversation history."""
     role: Literal["user", "assistant"]

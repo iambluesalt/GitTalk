@@ -53,44 +53,61 @@ langchain-ollama
 ## Phase 4 — Memory/state
 **No checkpointer** — see Deviation #3. `metadata_db.py` conversation CRUD (`create_conversation`, `add_message`, `get_conversation_history`, etc., lines 544-712) stays unchanged, used exactly as `rag_service.build_context` uses it today to build the initial message list per request.
 
-## Phase 5 — Tools (new file `app/backend/services/agent_tools.py`)
-- `make_tools(project_id: str) -> list` factory (tools close over `project_id` per-request — it must not be an LLM-visible parameter):
-  - `search_codebase(query: str) -> str` — `@tool` wrapping `search_service.hybrid_search(project_id, query)`, formats results as text the model can read. The raw `SearchResult`s also need to reach the SSE `sources` event (Phase 7) — return `(content, artifact)` via `response_format="content_and_artifact"` so the formatted text goes to the model and raw results are recoverable from the `ToolMessage.artifact` for event translation.
-  - `read_file(path: str, line_start: int | None, line_end: int | None) -> str` — reads from `project.clone_path` (`models.py:121`) on disk, path-traversal guarded (must resolve within `clone_path`).
-  - `list_files(dir: str = "") -> str` — check `repomap_service.py` first for existing tree-listing logic to reuse before writing new code.
-  - Skip `grep_repo` (v1 marks it stretch/optional) unless requested later.
+## Phase 5 — Tools (`app/backend/services/agent_tools.py`) — ✅ DONE
+- `make_tools(project_id) -> list[BaseTool]` factory; tools close over `project_id` and the resolved `clone_path`, so neither is LLM-visible. All three use `parse_docstring=True` so arg descriptions reach the model's tool schema.
+  - `search_codebase(query)` — `response_format="content_and_artifact"`: formatted numbered snippets go to the model, raw `SearchResult`s ride along in `ToolMessage.artifact` for Phase 7's `sources` event.
+  - `read_file(path, line_start=None, line_end=None)` — 1-indexed inclusive, line-numbered output, `READ_FILE_MAX_LINES`/`READ_FILE_MAX_CHARS` capped. Guards verified live: traversal (`../../.env`, `/etc/passwd`, `dir="../.."`), missing files, out-of-range lines, and `should_exclude` (so `.env`/keys/lockfiles are unreadable even inside the clone).
+  - `list_files(dir="")` — **deviation:** nothing in `repomap_service.py` was reusable (it does a full `rglob` + tree-sitter signature extraction, not a directory listing), so this is a small new `iterdir` + `EXCLUDED_DIRS`/`should_exclude` filter.
+  - `grep_repo` skipped as planned.
+- `dedup_overlapping`/`_merge_results` were **moved here** from `rag_service` (applied per search call) rather than imported, so Phase 9 can delete `rag_service.py` outright.
+- Per-call output ceilings (`SEARCH_RESULT_MAX_CHARS` etc.) are new: tool results accumulate across hops, so each call has to stay small enough that a 6-hop run still fits the window.
 
-## Phase 6 — Agent graph (new file `app/backend/services/agent_graph.py`, replaces `rag_service.py`'s retrieval-injection role)
-- `StateGraph` over a `TypedDict`/`MessagesState`-based state. Nodes: `agent` (model with `.bind_tools(tools)`) → conditional edge (`tools_condition`) → `tools` node (`ToolNode`) → loop back to `agent` → `END`.
-- System prompt assembly: port `rag_service._build_system_message`'s repo-map truncation and `_build_history_messages`'s token-budget history windowing (`rag_service.py:225-276`) into the graph's setup step (run once before invoking the graph, not a node) — same token-budget math, same `settings.MAX_CONTEXT_TOKENS` split.
-- The old `_build_user_message`'s manual "## Relevant Code" chunk injection (`rag_service.py:278-323`) is **replaced by tool-calling itself** — the agent now asks for code via `search_codebase` and gets it back as a `ToolMessage`, instead of code being pre-injected before the first model call. This is the actual point of the migration (multi-hop) and a real simplification, not just a port.
-- `router_service.classify()` pre-filter (kept per user decision): call before building the graph state. If `"general"` → skip the graph/tools entirely, call the chat model directly with the `general` prompt template (mirrors today's behavior exactly). If `"code"`/`"follow_up"` → run the full tool-calling graph with the `code_qa` template + repo map in the system message.
+## Phase 6 — Agent graph (`app/backend/services/agent_graph.py`) — ✅ DONE
+- `StateGraph(MessagesState)`: `agent` → `tools_condition` → `ToolNode` → back to `agent` → `END`. Compiled per request.
+- **The agent node streams (`model.astream()` + chunk summation) instead of `ainvoke`** — with `ainvoke` LangChain emits no `on_chat_model_stream` events, so the route would have had nothing to turn into `token` events. Chunk addition merges partial tool-call arguments back into one `AIMessage`.
+- Setup (not a node): `router_service.classify()` gate → repo-map/history token budgets → `SystemMessage` + windowed history + `HumanMessage`. `"general"` returns the bare chat model as the runnable (no graph, no tools); `"code"`/`"follow_up"` return the compiled graph. Both are driven identically by the route via `astream_events`.
+- **New `code_agent` prompt template** in `llm_service.PROMPT_TEMPLATES`: `code_qa` tells the model to answer "using ONLY the provided code context below … under '## Relevant Code'", which is false in a tool-calling world. `code_qa` is left untouched for the legacy path.
+- Budgets changed shape: there is no up-front chunk budget any more, so `code` reserves only repo-map 18% / history 25% and leaves the rest of the window for tool results (`follow_up` 10%/40%, `general` 15%/75%).
+- **Bug fixed in passing:** the route persists the user message *before* context assembly, so `get_conversation_history` returns it as the last turn and legacy sent the question twice. The agent path drops that trailing duplicate.
+- `llm_service.get_chat_model` gained a `tools=` kwarg: `RunnableWithFallbacks` has no `bind_tools`, so tools must be bound to each provider *before* fallbacks are composed or hybrid mode breaks.
 
-## Phase 7 — Route integration (`app/backend/routes/chat.py`, 219 lines)
-- Replace the `rag_service.build_context` + `llm_service.stream_chat` sequence with: build initial state (system + history, per Phase 6) → `graph.astream_events(state, version="v2")`.
-- Event translation to the **existing SSE schema** (`models.py:210-218`, confirmed exactly matched by frontend `chat.tsx`/`api.ts`/`types.ts` — zero frontend changes):
-  - Accumulate tool results from `on_tool_end` events across the run; once the graph reaches its final `on_chat_model_stream` sequence (no further tool calls pending), emit one `sources` event with the accumulated `CodeReference[]` — same shape as today, just potentially built from multiple tool calls instead of one retrieval.
-  - `on_chat_model_stream` chunks → `token` events, same as today.
-  - `done` / `error` events unchanged: still carry `conversation_id`, `response_time_ms`, optional `conversation_title`.
-- Unchanged: project validation, `db.add_message` persistence (user + assistant), `generate_title` call for new conversations, conversation CRUD routes (`list_conversations`, `get_conversation`, `delete_conversation`) — these don't touch the agent at all.
+## Phase 7 — Route integration (`app/backend/routes/chat.py`) — ✅ DONE
+- Both pipelines are async generators of `(event_name, data)` pairs — `_run_legacy` and `_run_agent` — selected by `settings.AGENT_BACKEND`. The endpoint body just formats them as SSE and accumulates the response text for persistence. **Deviation:** the `AGENT_BACKEND` flag was pulled forward from Phase 9 so the legacy path stays exercisable during the demo instead of being deleted first; it defaults to `langgraph`.
+- Event translation to the **existing SSE schema** — zero frontend changes:
+  - `on_tool_end` (name `search_codebase`) → artifact `SearchResult`s → `CodeReference`s, deduped by `file:line_start-line_end` across the whole run.
+  - **Deviation:** sources are emitted *cumulatively*, not once. One event fires immediately before the first token (empty if nothing was searched — the frontend only clears `isSearching` on a `sources` event, so `general` turns must still get one), and again whenever a later hop finds new code. Each event carries the full list, which the client already replaces wholesale.
+  - `on_chat_model_stream` → `token`. Text the model emits alongside a tool call streams through rather than being buffered; withholding it until the turn ends would stall the final answer.
+  - `done`/`error` unchanged.
+- Unchanged: project validation, `db.add_message` persistence, `generate_title`, conversation CRUD routes.
+- Verified live against Groq (`openai/gpt-oss-120b`) with real files and a stubbed index: one question produced `list_files` → `search_codebase` → `read_file` and a correctly cited answer.
 
-## Phase 8 — Testing
-- Port `test_rag.py` (intent-gated retrieval, template selection, history/repo-map budget truncation, dedup) and `test_router.py` (unchanged, router isn't touched) against the new structure.
-- `test_search.py` unchanged (search_service isn't touched — Deviation #2).
-- Add: tool unit tests (`agent_tools.py`), an agent-loop integration test asserting a multi-hop question produces 2+ `search_codebase` calls, and an SSE event-translation test (tool results → one `sources` event, correct `CodeReference` shape).
+## Phase 8 — Testing — ✅ DONE
+- `test_rag.py`/`test_router.py`/`test_search.py` needed no porting — `rag_service.py` and `search_service.py` are untouched (Deviation #2, and legacy path still lives until Phase 9 deletes it), so their existing tests already pass unchanged.
+- Tool unit tests: `tests/test_agent_tools.py` (already present, 30 tests — `search_codebase`/`read_file`/`list_files` guards, dedup moved from `rag_service`).
+- **New `tests/test_agent_graph.py`** (6 tests): `build_agent_run` gating (`general` skips the graph and binds no tools; `code` compiles a tool-bound graph with `recursion_limit = AGENT_MAX_TOOL_HOPS * 2 + 1`; missing project falls back to `general`; trailing duplicate user turn is dropped from history) plus two graph-loop integration tests driving the real compiled `StateGraph` with a scripted fake model and real `@tool`-decorated stand-ins: one proves a multi-hop question round-trips through `ToolNode` for 2+ `search_codebase` calls before the final answer, the other proves a no-tool-call response ends the graph after a single agent hop.
+- SSE event-translation test: done in Phase 7 (`test_chat_agent_backend_translates_events`), asserts `sources` precedes the first `token` and carries `CodeReference`-shaped data.
+- **Full suite after Phase 8** (`pytest tests --ignore=tests/test_chunker.py`): **269 passed, 16 failed (all `test_router.py`, pre-existing baseline, unchanged), 11 skipped.**
 
-## Phase 9 — Cutover
-- `AGENT_BACKEND: Literal["legacy","langgraph"]` config flag; `routes/chat.py` branches between old (`rag_service`+`llm_service.stream_chat`) and new (`agent_graph`) paths behind it.
-- Once validated in real usage with flag defaulted to `langgraph`: delete `rag_service.py`'s retrieval-injection code and `llm_service.py`'s old raw-httpx streaming/routing internals (`_stream_ollama`, `_stream_cloud`, hybrid try/except). **Keep**: `metadata_db.py` conversation CRUD, `search_service.py`, `vector_db.py` (per deviations above — not slated for deletion).
-- Do not merge to `main` until the flag defaults to `langgraph` and legacy code is deleted (per original plan).
+## Phase 9 — Cutover — ✅ DONE
+- ~~`AGENT_BACKEND` config flag; `routes/chat.py` branches between old and new paths behind it.~~ **Done in Phase 7**, defaulted to `langgraph`.
+- **Manual live verification (before deletion, per the safety-net gate below):** started `uvicorn` against the real Groq endpoint, cloned+indexed `karpathy/micrograd`, and drove `/api/chat` directly. A multi-hop prompt produced two distinct `search_codebase` calls (`search_codebase('class Neuron')`, `search_codebase('class Value')`) confirmed in server logs, a correctly cited final answer, and the SSE stream had `sources` before the first `token` and a trailing `done` with `conversation_id`/`conversation_title`. Test project and clone were deleted afterward.
+- `llm_service.py`'s old raw-httpx internals were already gone (Phase 1). This phase deleted the retrieval-injection code:
+  - `services/rag_service.py` deleted outright (`build_context`, `_dedup_overlapping`/`_merge_results` — already duplicated into `agent_tools.py` in Phase 5 — and the `_build_system_message`/`_build_history_messages`/`_build_user_message` chunk-injection builders).
+  - `routes/chat.py`: removed `_run_legacy`, the `rag_service` import, and the `AGENT_BACKEND` branch — `chat()` always calls `_run_agent` now.
+  - `AGENT_BACKEND` setting removed from `config.py` and `.env` (only one backend exists, so the flag had nothing left to select).
+  - `PROMPT_TEMPLATES["code_qa"]` removed from `llm_service.py` — it was the legacy chunk-injection prompt ("using ONLY the provided code context... under '## Relevant Code'"), unreachable now that `agent_graph.py` only ever requests `"general"` or `"code_agent"`. Fallback default in `get_prompt_template` repointed at `"code_agent"`.
+  - `models.RAGContext` removed (unused once `rag_service.py` was gone).
+  - Tests: `tests/test_rag.py` deleted (tested the deleted service); `tests/test_api.py::test_chat_streams_tokens` (legacy happy-path) deleted — the agent-backend happy path is already covered by the renamed `test_chat_streams_agent_events`; `tests/test_e2e.py`'s fixture no longer imports/patches `rag_svc`.
+  - **Kept, per deviations above**: `metadata_db.py` conversation CRUD, `search_service.py`, `vector_db.py`.
 
 ## Verification
 - `pytest app/backend/tests` after each phase (existing suite must keep passing where unchanged; ported tests updated where behavior changed).
 - **Known-bad baseline (pre-existing at commit `1d161b0`, unrelated to this migration — do not attribute to migration work):**
-  - `tests/test_chunker.py::test_large_function_chunks_stay_within_token_limit` hard-crashes the interpreter (tree-sitter native fault in `chunker_service.py:153`) — run the suite with `--ignore=tests/test_chunker.py` to get results.
-  - 17 failures: 16 in `tests/test_router.py` (classifier returns `general` where tests expect `code`) + `tests/test_api.py::test_chat_streams_tokens` (fixture mocks `generate_title` with a non-async `MagicMock`). Confirmed identical before and after Phases 1-2.
-- Manual: start backend (`uvicorn` per existing dev workflow), run a known-multi-hop question against an indexed project, confirm ≥2 tool calls in logs and correct final answer; confirm SSE `sources`/`token`/`done` events match frontend expectations by exercising the chat UI in `app/routes/chat.tsx`.
-- Confirm `AGENT_BACKEND=legacy` path still works unchanged before flipping default (Phase 9 safety net).
+  - `tests/test_chunker.py::test_large_function_chunks_stay_within_token_limit` hard-crashes the interpreter (tree-sitter native fault in `chunker_service.py:153`) — run with `--ignore=tests/test_chunker.py`.
+  - `tests/test_e2e.py` can also hard-crash the interpreter (`Windows fatal exception: access violation`, native pathlib fault inside `utils/exclusions.py:128 should_exclude` ← `analyzer_service.py:111 analyze_repository`) when the live-service skip guard doesn't trigger (i.e. git + Ollama + an embed model + a chat model are all actually available, as they were in this environment). Neither file touched by this migration; the analyzer/exclusions code is unrelated to chat/RAG. Run with `--ignore=tests/test_chunker.py --ignore=tests/test_e2e.py` for a clean automated run.
+  - Was 17 failures: 16 in `tests/test_router.py` (classifier returns `general` where tests expect `code`) + `tests/test_api.py::test_chat_streams_tokens` (fixture mocks `generate_title` with a non-async `MagicMock`). The `test_api` one was fixed in Phase 7; **baseline is 16 router failures**, confirmed identical before and after Phases 1-9 (`pytest tests --ignore=tests/test_chunker.py --ignore=tests/test_e2e.py`: 248 passed, 16 failed).
+- **Pre-existing, not fixed (out of migration scope):** `metadata_db.get_conversation_messages` is `ORDER BY created_at ASC LIMIT 20`, i.e. it returns the *oldest* 20 messages, so long conversations feed the model their opening turns and drop recent ones. The history windowing on top of it can only pick from what it's given. Worth a separate fix.
+- **Manual verification: done** — see Phase 9 above.
 
 ## Execution order / check-ins
 Implement phases 0-2 (housekeeping, model layer, embeddings) together, then check in. Then phases 5-7 (tools, graph, routes) together — this is the core risk area — then check in with a working end-to-end demo before Phase 8 (tests) and Phase 9 (cutover/deletion of legacy code).
