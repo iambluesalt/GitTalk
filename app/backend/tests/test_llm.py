@@ -1,25 +1,41 @@
 """
 Tests for the LLM service (llm_service.py).
 
-httpx calls are mocked via respx so no real LLM endpoint is needed.
-Covers Ollama streaming, cloud streaming, hybrid fallback, error paths,
-and the model-override parsing logic.
+The service is backed by LangChain chat models, so transport-level parsing
+(NDJSON / SSE) is LangChain's concern and is not retested here. These cover
+our own seams: model-override parsing, provider routing, Groq base-URL
+normalisation, chunk-text extraction, hybrid fallback semantics, and the
+httpx-based introspection helpers (mocked via respx).
 """
-import json
 import pytest
 import respx
 import httpx
 
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.runnables import RunnableWithFallbacks
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# parse_model_override
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.fixture()
 def llm():
     from services.llm_service import LLMService
     return LLMService()
 
+
+@pytest.fixture()
+def cloud_settings(monkeypatch):
+    """Patch fake cloud credentials into settings."""
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY",      "fake-key")
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL", "https://api.groq.com/openai/v1")
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_MODEL",        "fake-model")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# parse_model_override
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize("override, expected_provider, expected_model", [
     ("cloud:gemini-2.0-flash",       "cloud",  "gemini-2.0-flash"),
@@ -37,234 +53,207 @@ def test_parse_model_override(llm, override, expected_provider, expected_model):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Ollama streaming
+# Groq base-URL normalisation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _ollama_ndjson(*tokens: str, done_at_end=True) -> bytes:
-    """Build a fake Ollama /api/chat NDJSON response."""
-    lines = []
-    for t in tokens:
-        lines.append(json.dumps({"message": {"content": t}, "done": False}))
-    if done_at_end:
-        lines.append(json.dumps({"done": True}))
-    return b"\n".join(l.encode() for l in lines)
+@pytest.mark.parametrize("configured, expected", [
+    # The groq client appends /openai/v1 itself — the suffix must be stripped
+    ("https://api.groq.com/openai/v1",  "https://api.groq.com"),
+    ("https://api.groq.com/openai/v1/", "https://api.groq.com"),
+    ("https://api.groq.com/openai",     "https://api.groq.com"),
+    ("https://api.groq.com",            "https://api.groq.com"),
+    ("https://proxy.internal/openai/v1", "https://proxy.internal"),
+    (None,                              None),
+    ("",                                None),
+])
+def test_groq_base_url_normalisation(monkeypatch, configured, expected):
+    from services.llm_service import _groq_base_url
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL", configured)
+    assert _groq_base_url() == expected
 
 
-@respx.mock
-async def test_ollama_stream_yields_tokens(llm):
-    respx.post("http://localhost:11434/api/chat").mock(
-        return_value=httpx.Response(200, content=_ollama_ndjson("Hello", " world", "!"))
-    )
+# ═══════════════════════════════════════════════════════════════════════════════
+# Chunk text extraction
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    tokens = []
-    with respx.mock:
-        respx.post("http://localhost:11434/api/chat").mock(
-            return_value=httpx.Response(200, content=_ollama_ndjson("Hello", " world", "!"))
-        )
-        async for t in llm._stream_ollama([{"role": "user", "content": "hi"}]):
-            tokens.append(t)
-
-    assert tokens == ["Hello", " world", "!"]
-
-
-@respx.mock
-async def test_ollama_stream_stops_at_done(llm):
-    """Tokens after `done: true` must be ignored."""
-    ndjson = (
-        b'{"message": {"content": "tok1"}, "done": false}\n'
-        b'{"message": {"content": "HIDDEN"}, "done": true}\n'
-        b'{"message": {"content": "NEVER"}, "done": false}\n'
-    )
-    respx.post("http://localhost:11434/api/chat").mock(
-        return_value=httpx.Response(200, content=ndjson)
-    )
-
-    tokens = []
-    async for t in llm._stream_ollama([{"role": "user", "content": "hi"}]):
-        tokens.append(t)
-
-    assert "HIDDEN" not in tokens
-    assert "NEVER" not in tokens
-    assert "tok1" in tokens
+@pytest.mark.parametrize("content, expected", [
+    ("plain text",                                          "plain text"),
+    ("",                                                    ""),
+    ([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}], "ab"),
+    (["raw", {"type": "text", "text": "!"}],                "raw!"),
+    ([{"type": "image", "url": "x"}],                       ""),
+])
+def test_chunk_text_extraction(content, expected):
+    from services.llm_service import _chunk_text
+    assert _chunk_text(AIMessageChunk(content=content)) == expected
 
 
-@respx.mock
-async def test_ollama_stream_skips_empty_content(llm):
-    """Chunks with empty content string should not yield empty tokens."""
-    ndjson = (
-        b'{"message": {"content": ""}, "done": false}\n'
-        b'{"message": {"content": "real"}, "done": false}\n'
-        b'{"done": true}\n'
-    )
-    respx.post("http://localhost:11434/api/chat").mock(
-        return_value=httpx.Response(200, content=ndjson)
-    )
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_chat_model — provider routing
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    tokens = []
-    async for t in llm._stream_ollama([{"role": "user", "content": "hi"}]):
-        tokens.append(t)
+def test_get_chat_model_ollama_provider(llm, monkeypatch):
+    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER", "ollama")
+    model = llm.get_chat_model()
+    assert isinstance(model, ChatOllama)
 
+
+def test_get_chat_model_cloud_provider(llm, monkeypatch, cloud_settings):
+    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER", "cloud")
+    model = llm.get_chat_model()
+    assert isinstance(model, ChatGroq)
+    assert model.model_name == "fake-model"
+
+
+def test_get_chat_model_hybrid_attaches_fallback(llm, monkeypatch, cloud_settings):
+    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER", "hybrid")
+    model = llm.get_chat_model()
+    assert isinstance(model, RunnableWithFallbacks)
+    assert isinstance(model.runnable, ChatGroq)
+    assert isinstance(model.fallbacks[0], ChatOllama)
+
+
+def test_get_chat_model_hybrid_without_cloud_uses_ollama(llm, monkeypatch):
+    """Hybrid with no cloud credentials must go straight to Ollama, not error."""
+    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER", "hybrid")
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY", None)
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL", None)
+    model = llm.get_chat_model()
+    assert isinstance(model, ChatOllama)
+
+
+@pytest.mark.parametrize("override, expected_cls, expected_model", [
+    ("ollama:deepseek-r1:8b", ChatOllama, "deepseek-r1:8b"),
+    ("cloud:llama-3.3-70b",   ChatGroq,   "llama-3.3-70b"),
+])
+def test_get_chat_model_override_wins(llm, monkeypatch, cloud_settings,
+                                      override, expected_cls, expected_model):
+    """A 'provider:model' override beats LLM_PROVIDER and the configured model."""
+    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER", "hybrid")
+    model = llm.get_chat_model(override)
+    assert isinstance(model, expected_cls)
+    name = getattr(model, "model", None) or model.model_name
+    assert name == expected_model
+
+
+def test_make_groq_raises_when_not_configured(llm, monkeypatch):
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY",     None)
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL", None)
+    with pytest.raises(RuntimeError, match="not configured"):
+        llm._make_groq()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# stream_chat
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def test_stream_chat_yields_tokens(llm, monkeypatch):
+    fake = FakeListChatModel(responses=["Hi!"])
+    monkeypatch.setattr(llm, "get_chat_model", lambda *_a, **_kw: fake)
+
+    tokens = [t async for t in llm.stream_chat([{"role": "user", "content": "q"}])]
+
+    assert "".join(tokens) == "Hi!"
     assert "" not in tokens
-    assert "real" in tokens
 
 
-@respx.mock
-async def test_ollama_stream_malformed_json_skipped(llm):
-    """Lines that are not valid JSON must be silently skipped."""
-    ndjson = (
-        b"NOT_JSON\n"
-        b'{"message": {"content": "valid"}, "done": false}\n'
-        b'{"done": true}\n'
-    )
-    respx.post("http://localhost:11434/api/chat").mock(
-        return_value=httpx.Response(200, content=ndjson)
+async def test_stream_chat_skips_empty_chunks(llm, monkeypatch):
+    """Empty content chunks must not be forwarded as empty tokens."""
+    class _EmptyThenReal(FakeListChatModel):
+        async def _astream(self, *args, **kwargs):
+            for text in ("", "real", ""):
+                yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+
+    monkeypatch.setattr(
+        llm, "get_chat_model", lambda *_a, **_kw: _EmptyThenReal(responses=["x"])
     )
 
-    tokens = []
-    async for t in llm._stream_ollama([{"role": "user", "content": "hi"}]):
-        tokens.append(t)
-
-    assert tokens == ["valid"]
-
-
-@respx.mock
-async def test_ollama_stream_http_error_raises(llm):
-    respx.post("http://localhost:11434/api/chat").mock(
-        return_value=httpx.Response(500, text="Internal Server Error")
-    )
-    with pytest.raises(httpx.HTTPStatusError):
-        async for _ in llm._stream_ollama([{"role": "user", "content": "hi"}]):
-            pass
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Cloud (OpenAI-compatible) streaming
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _openai_sse(*tokens: str, done=True) -> bytes:
-    """Build a fake OpenAI-compatible SSE response."""
-    lines = []
-    for t in tokens:
-        data = {"choices": [{"delta": {"content": t}}]}
-        lines.append(f"data: {json.dumps(data)}".encode())
-    if done:
-        lines.append(b"data: [DONE]")
-    return b"\n".join(lines)
-
-
-@pytest.fixture()
-def cloud_llm(monkeypatch):
-    """LLMService with fake cloud credentials patched into settings."""
-    from services.llm_service import LLMService
-    svc = LLMService()
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY",     "fake-key")
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL","http://fake-cloud.test/v1")
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_MODEL",       "fake-model")
-    return svc
-
-
-@respx.mock
-async def test_cloud_stream_yields_tokens(cloud_llm):
-    respx.post("http://fake-cloud.test/v1/chat/completions").mock(
-        return_value=httpx.Response(200, content=_openai_sse("Hi", " there"))
-    )
-
-    tokens = []
-    async for t in cloud_llm._stream_cloud([{"role": "user", "content": "hello"}]):
-        tokens.append(t)
-
-    assert tokens == ["Hi", " there"]
-
-
-@respx.mock
-async def test_cloud_stream_done_sentinel_stops_iteration(cloud_llm):
-    respx.post("http://fake-cloud.test/v1/chat/completions").mock(
-        return_value=httpx.Response(200, content=_openai_sse("tok"))
-    )
-
-    tokens = []
-    async for t in cloud_llm._stream_cloud([{"role": "user", "content": "hi"}]):
-        tokens.append(t)
-
-    assert "tok" in tokens
-
-
-@respx.mock
-async def test_cloud_stream_skips_empty_delta(cloud_llm):
-    sse = (
-        b'data: {"choices": [{"delta": {}}]}\n'
-        b'data: {"choices": [{"delta": {"content": "real"}}]}\n'
-        b"data: [DONE]"
-    )
-    respx.post("http://fake-cloud.test/v1/chat/completions").mock(
-        return_value=httpx.Response(200, content=sse)
-    )
-
-    tokens = []
-    async for t in cloud_llm._stream_cloud([{"role": "user", "content": "hi"}]):
-        tokens.append(t)
-
+    tokens = [t async for t in llm.stream_chat([{"role": "user", "content": "q"}])]
     assert tokens == ["real"]
 
 
-@respx.mock
-async def test_cloud_stream_401_raises(cloud_llm):
-    respx.post("http://fake-cloud.test/v1/chat/completions").mock(
-        return_value=httpx.Response(401, json={"error": "Unauthorized"})
-    )
-    with pytest.raises(httpx.HTTPStatusError):
-        async for _ in cloud_llm._stream_cloud([{"role": "user", "content": "hi"}]):
-            pass
-
-
-@respx.mock
-async def test_cloud_stream_429_raises(cloud_llm):
-    respx.post("http://fake-cloud.test/v1/chat/completions").mock(
-        return_value=httpx.Response(429, json={"error": "Rate limit"})
-    )
-    with pytest.raises(httpx.HTTPStatusError):
-        async for _ in cloud_llm._stream_cloud([{"role": "user", "content": "hi"}]):
-            pass
-
-
-async def test_cloud_stream_raises_when_not_configured(monkeypatch):
-    """_stream_cloud must raise RuntimeError when CLOUD_API_KEY is not set.
-    We patch the settings so this test is independent of whatever .env has.
-    """
-    from services.llm_service import LLMService
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY",     None)
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL", None)
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_MODEL",        None)
-
-    svc = LLMService()
-
-    with pytest.raises(RuntimeError, match="not configured"):
-        async for _ in svc._stream_cloud([]):
-            pass
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# Hybrid mode: cloud first, Ollama fallback
+# Hybrid fallback semantics
+#
+# We rely on RunnableWithFallbacks.astream pulling the *first* chunk inside its
+# try block: a primary that fails before yielding anything falls back, one that
+# fails mid-stream propagates. That matches the previous hand-rolled behaviour,
+# so it is pinned here.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@respx.mock
-async def test_hybrid_uses_cloud_when_available(monkeypatch):
-    from services.llm_service import LLMService
-    svc = LLMService()
-    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER",      "hybrid")
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY",     "key")
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL","http://cloud.test/v1")
-    monkeypatch.setattr("services.llm_service.settings.CLOUD_MODEL",       "m")
-
-    respx.post("http://cloud.test/v1/chat/completions").mock(
-        return_value=httpx.Response(200, content=_openai_sse("cloud-tok"))
+async def test_hybrid_falls_back_when_cloud_fails_immediately(llm, monkeypatch):
+    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER", "hybrid")
+    monkeypatch.setattr(
+        llm, "_make_groq",
+        lambda *_a, **_kw: FakeListChatModel(responses=["cloud"], error_on_chunk_number=0),
     )
+    monkeypatch.setattr(
+        llm, "_make_ollama", lambda *_a, **_kw: FakeListChatModel(responses=["local"])
+    )
+    monkeypatch.setattr(llm, "_cloud_configured", lambda: True)
+
+    tokens = [t async for t in llm.stream_chat([{"role": "user", "content": "q"}])]
+    assert "".join(tokens) == "local"
+
+
+async def test_hybrid_propagates_when_cloud_fails_mid_stream(llm, monkeypatch):
+    """Once tokens have been emitted, a failure must surface — not silently restart."""
+    monkeypatch.setattr("services.llm_service.settings.LLM_PROVIDER", "hybrid")
+    monkeypatch.setattr(
+        llm, "_make_groq",
+        lambda *_a, **_kw: FakeListChatModel(responses=["cloud"], error_on_chunk_number=2),
+    )
+    monkeypatch.setattr(
+        llm, "_make_ollama", lambda *_a, **_kw: FakeListChatModel(responses=["local"])
+    )
+    monkeypatch.setattr(llm, "_cloud_configured", lambda: True)
 
     tokens = []
-    async for t in svc.stream_chat([{"role": "user", "content": "q"}]):
-        tokens.append(t)
+    with pytest.raises(Exception):
+        async for t in llm.stream_chat([{"role": "user", "content": "q"}]):
+            tokens.append(t)
 
-    assert "cloud-tok" in tokens
+    assert "".join(tokens) == "cl"  # partial primary output, no fallback restart
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# generate_title
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def test_generate_title_falls_back_to_truncated_message(llm, monkeypatch):
+    """If the fast model is unreachable, fall back to the first 60 chars."""
+    monkeypatch.setattr(
+        "services.llm_service.settings.OLLAMA_BASE_URL", "http://127.0.0.1:1"
+    )
+    message = "How does the authentication middleware validate refresh tokens in this repo?"
+    title = await llm.generate_title(message)
+    assert title == message[:60].rstrip()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# check_availability
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@respx.mock
+async def test_check_availability_reports_both(llm, monkeypatch, cloud_settings):
+    monkeypatch.setattr("services.llm_service.settings.OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setattr("services.llm_service.settings.OLLAMA_MODEL", "qwen2.5-coder")
+    respx.get("http://localhost:11434/api/tags").mock(
+        return_value=httpx.Response(200, json={"models": [{"name": "qwen2.5-coder:7b"}]})
+    )
+
+    status = await llm.check_availability()
+    assert status == {"ollama": True, "cloud": True}
+
+
+@respx.mock
+async def test_check_availability_ollama_down(llm, monkeypatch):
+    monkeypatch.setattr("services.llm_service.settings.OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY", None)
+    respx.get("http://localhost:11434/api/tags").mock(side_effect=httpx.ConnectError("down"))
+
+    status = await llm.check_availability()
+    assert status == {"ollama": False, "cloud": False}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -272,9 +261,7 @@ async def test_hybrid_uses_cloud_when_available(monkeypatch):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @respx.mock
-async def test_list_models_includes_ollama_models(monkeypatch):
-    from services.llm_service import LLMService
-    svc = LLMService()
+async def test_list_models_includes_ollama_models(llm, monkeypatch):
     monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY", None)
     monkeypatch.setattr("services.llm_service.settings.OLLAMA_EMBED_MODEL", "nomic-embed-text")
     monkeypatch.setattr("services.llm_service.settings.OLLAMA_BASE_URL", "http://localhost:11434")
@@ -284,7 +271,7 @@ async def test_list_models_includes_ollama_models(monkeypatch):
         return_value=httpx.Response(200, json=payload)
     )
 
-    models = await svc.list_models()
+    models = await llm.list_models()
     ids = [m["id"] for m in models]
     assert "ollama:qwen2.5-coder:7b" in ids
     # Embed model must be excluded
@@ -292,9 +279,7 @@ async def test_list_models_includes_ollama_models(monkeypatch):
 
 
 @respx.mock
-async def test_list_models_includes_cloud_model(monkeypatch):
-    from services.llm_service import LLMService
-    svc = LLMService()
+async def test_list_models_includes_cloud_model(llm, monkeypatch):
     monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY",      "key")
     monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL", "http://x/v1")
     monkeypatch.setattr("services.llm_service.settings.CLOUD_MODEL",        "gemini-flash")
@@ -304,15 +289,13 @@ async def test_list_models_includes_cloud_model(monkeypatch):
         return_value=httpx.Response(200, json={"models": []})
     )
 
-    models = await svc.list_models()
+    models = await llm.list_models()
     ids = [m["id"] for m in models]
     assert "cloud:gemini-flash" in ids
 
 
 @respx.mock
-async def test_list_models_ollama_down_returns_cloud_only(monkeypatch):
-    from services.llm_service import LLMService
-    svc = LLMService()
+async def test_list_models_ollama_down_returns_cloud_only(llm, monkeypatch):
     monkeypatch.setattr("services.llm_service.settings.CLOUD_API_KEY",      "key")
     monkeypatch.setattr("services.llm_service.settings.CLOUD_API_BASE_URL", "http://x/v1")
     monkeypatch.setattr("services.llm_service.settings.CLOUD_MODEL",        "gpt-4o-mini")
@@ -320,5 +303,5 @@ async def test_list_models_ollama_down_returns_cloud_only(monkeypatch):
 
     respx.get("http://localhost:11434/api/tags").mock(side_effect=httpx.ConnectError("down"))
 
-    models = await svc.list_models()
+    models = await llm.list_models()
     assert any(m["id"] == "cloud:gpt-4o-mini" for m in models)

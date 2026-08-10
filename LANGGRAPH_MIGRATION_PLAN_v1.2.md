@@ -21,27 +21,28 @@ langchain-groq
 langchain-ollama
 ```
 
-## Phase 0 — Housekeeping
+## Phase 0 — Housekeeping — ✅ DONE (commit `1dd22ad`)
 - `git rm requirements.txt` and `git add app/requirements.txt` — this move is already in progress (working tree shows root file deleted, `app/requirements.txt` untracked with identical content), just needs finalizing as a commit.
 - No `bash.exe.stackdump`, no stray `COMMANDS.txt`/`PIPELINE_AUDIT.md`/`PROJECT_STATE.md` found in the repo — nothing to do there (v1 assumed these existed; confirmed they don't).
 - `.gitignore` already covers `venv`, `build/`, `.react-router/`, `data/`, `cloned_repos/`, `node_modules/` — confirmed, no change needed.
 
-## Phase 1 — Model layer (`app/backend/services/llm_service.py`, 313 lines)
-- `app/backend/config.py`: replace generic `CLOUD_API_PROVIDER`/`CLOUD_API_BASE_URL`/`CLOUD_API_KEY`/`CLOUD_MODEL` with `GROQ_API_KEY`, `GROQ_MODEL` (base URL is fixed inside `ChatGroq`). Keep `LLM_PROVIDER: Literal["ollama","cloud","hybrid"]` knob name as-is (v1's explicit choice — `cloud` means Groq).
-- `ChatGroq(model=settings.GROQ_MODEL, api_key=settings.GROQ_API_KEY, streaming=True)` and `ChatOllama(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL)`.
-- Hybrid mode: `primary.with_fallbacks([fallback])`. Verify during implementation that LC's fallback-on-stream semantics match today's "only fallback if no token has been yielded yet, else propagate" behavior (`llm_service.py:98-116`) — LC's `with_fallbacks` triggers on exception raised during stream setup/early iteration; confirm with a quick manual test since a generator can't retract already-yielded chunks either way.
-- `PROMPT_TEMPLATES`/`get_prompt_template(name, project_name)` (`llm_service.py:18-43`): keep the exact same function signature (thin wrapper backed by `ChatPromptTemplate.from_template(...).format(...)`) — call sites in `rag_service.py:235,237,243` (moving into the graph's system-prompt builder in Phase 6) don't need to change.
-- `generate_title()` (`llm_service.py:118`): `ChatOllama(model=settings.OLLAMA_FAST_MODEL).ainvoke(...)`, same truncation fallback on error/empty result.
-- `list_models()`/`check_availability()` (`llm_service.py:155,181`): keep as-is (direct Ollama `/api/tags` calls) — these are introspection/UI-picker helpers, not chat calls, no LC equivalent needed.
-- Update `app/backend/tests/test_llm.py` alongside.
+## Phase 1 — Model layer (`app/backend/services/llm_service.py`) — ✅ DONE
+- **Config names kept as `CLOUD_*` (user decision), not renamed to `GROQ_*`.** `.env` already points the generic cloud path at Groq (`https://api.groq.com/openai/v1`, `openai/gpt-oss-120b`), and the settings UI exposes a full 4-field cloud form (`settings.tsx:594-629`, `types.ts:137-140,162-165`, `models.py:57-60`, `errors.ts:41`). Renaming would have forced a frontend rewrite for zero functional gain. `LLM_PROVIDER: Literal["ollama","cloud","hybrid"]` unchanged; `cloud` means Groq.
+- `_groq_base_url()` normalises `CLOUD_API_BASE_URL` by stripping a trailing `/openai/v1` — the groq SDK's own default base is `https://api.groq.com` and it appends `/openai/v1` to every path, so passing the stored value through raw would double the path.
+- `get_chat_model(model_override)` is the new public seam returning a `BaseChatModel` (Phase 6 needs it for `.bind_tools()`); `stream_chat()` keeps its old signature and is now a thin wrapper over `model.astream()`.
+- **Open question resolved:** LC's `RunnableWithFallbacks.astream` pulls the *first* chunk inside its `try` block, so it falls back only when the primary fails before yielding anything and re-raises on mid-stream failure — exactly the old `yield_started` semantics. Verified in source and pinned by two tests.
+- `PROMPT_TEMPLATES`/`get_prompt_template(name, project_name)` unchanged. **Deviation:** not backed by `ChatPromptTemplate` — `.format()` on a `ChatPromptTemplate` renders a role-prefixed message string, which is wrong for a function that must return a raw system-prompt string. Plain `str.format()` stays.
+- `generate_title()` → `ChatOllama(OLLAMA_FAST_MODEL, temperature=0.3, num_predict=20, timeout=10s).ainvoke()`, same truncation fallback. Now hits `/api/chat` instead of `/api/generate`.
+- `list_models()`/`check_availability()` kept as direct httpx `/api/tags` calls.
+- Raw-httpx `_stream_ollama`/`_stream_cloud` **deleted now** rather than at Phase 9 — Phase 1 replaces the model layer wholesale, so Phase 9's llm_service deletion is already done.
+- `tests/test_llm.py` rewritten (36 tests): transport parsing is LC's problem now; tests cover override parsing, base-URL normalisation, provider routing, chunk-text extraction, fallback semantics, introspection helpers.
+- Verified live: streaming through `ChatGroq` against the configured Groq endpoint returns tokens correctly.
 
-## Phase 2 — Embeddings (`app/backend/services/embedding_service.py`, 131 lines)
-- `OllamaEmbeddings(model=settings.OLLAMA_EMBED_MODEL, base_url=settings.OLLAMA_BASE_URL)`.
-- `langchain_ollama.OllamaEmbeddings` does not inject Nomic's `search_document:`/`search_query:` prefixes — subclass it, override `embed_documents`/`embed_query` to prepend the prefix (mirrors `embedding_service.py:50,73`) before calling `super()`.
-- Keep `MAX_EMBED_CHARS` truncation (`embedding_service.py:15,28`) — LC doesn't do this, and nomic-embed-text needs it (8192-token ctx).
-- Keep the per-item zero-vector fallback on batch failure (`embedding_service.py:34-68`) — LC will just raise; wrap it.
-- Verify during implementation whether `OllamaEmbeddings.embed_documents` already batches via Ollama's `/api/embed` list input; keep manual `EMBEDDING_BATCH_SIZE` chunking only if it doesn't (v1's own hedge, confirmed still open).
-- Call sites unaffected: `search_service.py:36` (`embed_single`→`embed_query`), `indexing_service.py:317-320` (`embed_texts`→`embed_documents`).
+## Phase 2 — Embeddings (`app/backend/services/embedding_service.py`) — ✅ DONE
+- `NomicOllamaEmbeddings(OllamaEmbeddings)` subclass injects the `search_document:`/`search_query:` prefixes and truncates at `MAX_EMBED_CHARS` (both confirmed absent from LC). `embed_query` calls `super().embed_documents` directly so the query prefix isn't overwritten by our own document prefix.
+- **Open question resolved:** `OllamaEmbeddings.aembed_documents` sends the entire list to `/api/embed` in a single request with no chunking — so manual `EMBEDDING_BATCH_SIZE` batching is **kept** in `EmbeddingService.embed_texts`, along with the per-item retry and zero-vector fallback.
+- `EmbeddingService` keeps its public API (`embed_texts`, `embed_single`, `is_available`) — call sites at `search_service.py:36` and `indexing_service.py:317-320` unchanged.
+- New `tests/test_embedding.py` (10 tests) covers prefixes, truncation, batch splitting, and both failure paths. Not live-verified: Ollama was not running locally at the time.
 
 ## Phase 3 — Retrieval
 **No rewrite** — see Deviation #2. `search_service.hybrid_search` and `vector_db.py` stay exactly as-is. They get wrapped as a tool in Phase 5, not restructured.
@@ -82,6 +83,9 @@ langchain-ollama
 
 ## Verification
 - `pytest app/backend/tests` after each phase (existing suite must keep passing where unchanged; ported tests updated where behavior changed).
+- **Known-bad baseline (pre-existing at commit `1d161b0`, unrelated to this migration — do not attribute to migration work):**
+  - `tests/test_chunker.py::test_large_function_chunks_stay_within_token_limit` hard-crashes the interpreter (tree-sitter native fault in `chunker_service.py:153`) — run the suite with `--ignore=tests/test_chunker.py` to get results.
+  - 17 failures: 16 in `tests/test_router.py` (classifier returns `general` where tests expect `code`) + `tests/test_api.py::test_chat_streams_tokens` (fixture mocks `generate_title` with a non-async `MagicMock`). Confirmed identical before and after Phases 1-2.
 - Manual: start backend (`uvicorn` per existing dev workflow), run a known-multi-hop question against an indexed project, confirm ≥2 tool calls in logs and correct final answer; confirm SSE `sources`/`token`/`done` events match frontend expectations by exercising the chat UI in `app/routes/chat.tsx`.
 - Confirm `AGENT_BACKEND=legacy` path still works unchanged before flipping default (Phase 9 safety net).
 
