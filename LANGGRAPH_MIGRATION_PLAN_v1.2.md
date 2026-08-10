@@ -39,7 +39,10 @@ langchain-ollama
 - Verified live: streaming through `ChatGroq` against the configured Groq endpoint returns tokens correctly.
 
 ## Phase 2 — Embeddings (`app/backend/services/embedding_service.py`) — ✅ DONE
-- `NomicOllamaEmbeddings(OllamaEmbeddings)` subclass injects the `search_document:`/`search_query:` prefixes and truncates at `MAX_EMBED_CHARS` (both confirmed absent from LC). `embed_query` calls `super().embed_documents` directly so the query prefix isn't overwritten by our own document prefix.
+- `PrefixedOllamaEmbeddings(OllamaEmbeddings)` subclass injects per-task prefixes and truncates at `MAX_EMBED_CHARS` (both confirmed absent from LC). `embed_query` calls `super().embed_documents` directly so the query prefix isn't overwritten by our own document prefix.
+- **Prefixes are gated on the embed model**, not applied unconditionally as the old code did: `resolve_task_prefixes(model)` looks the model family up in `TASK_PREFIXES` (`nomic-embed*` → `search_document: `/`search_query: `) and returns empty strings otherwise. `ollama_embed_model` is user-editable in the settings UI, and prefixing a model that doesn't expect one silently corrupts its vectors with no error. Current `.env` (`nomic-embed-text:v1.5`) resolves to the same prefixes as before — no reindex needed.
+- `MAX_EMBED_CHARS` stays unconditional: it's a safety ceiling, harmless for models with a larger context.
+- `OLLAMA_FAST_MODEL` (title generation) added explicitly to `.env` — it was relying on the `config.py` default, so an unpulled `llama3.2:1b` meant every title silently degraded to a truncated user message. Still absent from `_config_dict()`/`ConfigUpdate`, so it is not visible in the settings UI (unchanged, out of migration scope).
 - **Open question resolved:** `OllamaEmbeddings.aembed_documents` sends the entire list to `/api/embed` in a single request with no chunking — so manual `EMBEDDING_BATCH_SIZE` batching is **kept** in `EmbeddingService.embed_texts`, along with the per-item retry and zero-vector fallback.
 - `EmbeddingService` keeps its public API (`embed_texts`, `embed_single`, `is_available`) — call sites at `search_service.py:36` and `indexing_service.py:317-320` unchanged.
 - New `tests/test_embedding.py` (10 tests) covers prefixes, truncation, batch splitting, and both failure paths. Not live-verified: Ollama was not running locally at the time.

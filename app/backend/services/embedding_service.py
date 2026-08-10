@@ -9,8 +9,27 @@ from config import settings
 from logger import logger
 
 
-# nomic-embed-text context limit is 8192 tokens; leave room for prefix overhead
+# Safety cap on a single embedding input. nomic-embed-text tops out at 8192
+# tokens; this leaves room for prefix overhead and is a harmless ceiling for
+# models with a larger context.
 MAX_EMBED_CHARS = 24000  # ~6000 tokens at 4 chars/token, safe margin
+
+# Embedding models needing asymmetric task prefixes, keyed by model-name prefix.
+# Applying these to a model that doesn't expect them corrupts the vectors, so
+# the mapping is opt-in per family rather than unconditional.
+TASK_PREFIXES: dict[str, tuple[str, str]] = {
+    # family: (document_prefix, query_prefix)
+    "nomic-embed": ("search_document: ", "search_query: "),
+}
+
+
+def resolve_task_prefixes(model: str) -> tuple[str, str]:
+    """Return the (document, query) prefixes an embedding model expects."""
+    name = model.strip().lower()
+    for family, prefixes in TASK_PREFIXES.items():
+        if name.startswith(family):
+            return prefixes
+    return "", ""
 
 
 def _truncate(text: str) -> str:
@@ -20,32 +39,38 @@ def _truncate(text: str) -> str:
     return text[:MAX_EMBED_CHARS]
 
 
-class NomicOllamaEmbeddings(OllamaEmbeddings):
+class PrefixedOllamaEmbeddings(OllamaEmbeddings):
     """
-    OllamaEmbeddings with nomic-embed-text task prefixes and context truncation.
+    OllamaEmbeddings with per-task prefixes and context truncation.
 
-    nomic-embed-text requires asymmetric 'search_document: ' / 'search_query: '
-    prefixes to distinguish indexed documents from queries; LangChain's client
-    does not inject them, and it does not truncate over-long inputs either.
+    Models like nomic-embed-text distinguish indexed documents from queries via
+    a task prefix; LangChain's client injects neither prefixes nor truncation.
+    Both prefixes default to empty, so a model that doesn't want them is left
+    untouched.
     """
+
+    document_prefix: str = ""
+    query_prefix: str = ""
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return super().embed_documents(
-            [f"search_document: {_truncate(t)}" for t in texts]
+            [f"{self.document_prefix}{_truncate(t)}" for t in texts]
         )
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         return await super().aembed_documents(
-            [f"search_document: {_truncate(t)}" for t in texts]
+            [f"{self.document_prefix}{_truncate(t)}" for t in texts]
         )
 
     def embed_query(self, text: str) -> list[float]:
         # Bypass our own embed_documents so the query prefix isn't overwritten
-        results = super().embed_documents([f"search_query: {_truncate(text)}"])
+        results = super().embed_documents([f"{self.query_prefix}{_truncate(text)}"])
         return results[0] if results else []
 
     async def aembed_query(self, text: str) -> list[float]:
-        results = await super().aembed_documents([f"search_query: {_truncate(text)}"])
+        results = await super().aembed_documents(
+            [f"{self.query_prefix}{_truncate(text)}"]
+        )
         return results[0] if results else []
 
 
@@ -64,10 +89,16 @@ class EmbeddingService:
         self.model = model or settings.OLLAMA_EMBED_MODEL
         self.batch_size = batch_size or settings.EMBEDDING_BATCH_SIZE
         self.timeout = settings.OLLAMA_TIMEOUT
-        self.embeddings = NomicOllamaEmbeddings(
+
+        document_prefix, query_prefix = resolve_task_prefixes(self.model)
+        if not document_prefix:
+            logger.debug(f"No task prefixes registered for embed model '{self.model}'")
+        self.embeddings = PrefixedOllamaEmbeddings(
             model=self.model,
             base_url=self.base_url,
             client_kwargs={"timeout": float(self.timeout)},
+            document_prefix=document_prefix,
+            query_prefix=query_prefix,
         )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:

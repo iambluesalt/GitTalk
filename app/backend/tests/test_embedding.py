@@ -2,8 +2,8 @@
 Tests for the embedding service (embedding_service.py).
 
 The transport is LangChain's OllamaEmbeddings, so what is tested here is the
-behaviour we layer on top of it: nomic-embed-text task prefixes, context
-truncation, request batching, and graceful degradation when a batch fails.
+behaviour we layer on top of it: per-model task prefixes, context truncation,
+request batching, and graceful degradation when a batch fails.
 The parent client call is stubbed, so no Ollama server is needed.
 """
 import pytest
@@ -12,7 +12,8 @@ from langchain_ollama import OllamaEmbeddings
 from services.embedding_service import (
     MAX_EMBED_CHARS,
     EmbeddingService,
-    NomicOllamaEmbeddings,
+    PrefixedOllamaEmbeddings,
+    resolve_task_prefixes,
 )
 
 
@@ -31,7 +32,40 @@ def calls(monkeypatch):
 
 @pytest.fixture()
 def embedder():
-    return NomicOllamaEmbeddings(model="nomic-embed-text", base_url="http://test")
+    """Client configured the way EmbeddingService configures it for nomic."""
+    document_prefix, query_prefix = resolve_task_prefixes("nomic-embed-text")
+    return PrefixedOllamaEmbeddings(
+        model="nomic-embed-text",
+        base_url="http://test",
+        document_prefix=document_prefix,
+        query_prefix=query_prefix,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Task prefix resolution
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("model, expected", [
+    ("nomic-embed-text",       ("search_document: ", "search_query: ")),
+    ("nomic-embed-text:v1.5",  ("search_document: ", "search_query: ")),
+    ("NOMIC-EMBED-TEXT",       ("search_document: ", "search_query: ")),
+    # Models with no registered prefixes must be left untouched — prefixing a
+    # model that doesn't expect one silently corrupts its vectors.
+    ("mxbai-embed-large",      ("", "")),
+    ("all-minilm",             ("", "")),
+    ("",                       ("", "")),
+])
+def test_resolve_task_prefixes(model, expected):
+    assert resolve_task_prefixes(model) == expected
+
+
+async def test_unprefixed_model_sends_text_verbatim(calls):
+    svc = EmbeddingService(model="mxbai-embed-large")
+    await svc.embed_texts(["def foo(): pass"])
+    await svc.embed_single("how does auth work")
+
+    assert calls == [["def foo(): pass"], ["how does auth work"]]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
