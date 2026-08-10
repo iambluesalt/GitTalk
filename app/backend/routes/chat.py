@@ -1,9 +1,10 @@
 """
 Chat routes — POST /api/chat (SSE streaming), conversation management.
-Orchestrates: RAG context → LLM streaming → persistence.
+Orchestrates: agent run → LLM streaming → persistence.
 """
 import json
 import time
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -11,15 +12,92 @@ from fastapi.responses import StreamingResponse
 from logger import logger
 from models import (
     ChatRequest,
-    CodeReference,
     ProjectStatus,
     SSEEvent,
 )
 from storage.metadata_db import db
-from services.rag_service import rag_service
-from services.llm_service import llm_service
+from services.agent_graph import build_agent_run
+from services.agent_tools import result_to_reference
+from services.llm_service import llm_service, _chunk_text
 
 router = APIRouter()
+
+# (event_name, event_data) pairs — the caller formats them as SSE.
+StreamEvents = AsyncGenerator[tuple[str, dict], None]
+
+
+def _tool_artifact(output: Any) -> list:
+    """Pull the raw SearchResult list out of a finished tool call."""
+    artifact = getattr(output, "artifact", None)
+    if artifact is None and isinstance(output, tuple) and len(output) == 2:
+        artifact = output[1]
+    return artifact or []
+
+
+async def _run_agent(request: ChatRequest, conversation_id: str) -> StreamEvents:
+    """The model searches and reads the repo on its own, possibly several times,
+    before answering.
+
+    Sources are emitted cumulatively — once before the first token (so the
+    frontend's "searching" state clears exactly as it does today), and again
+    whenever a later hop turns up code the client hasn't seen. Each event carries
+    the full list, so the client just replaces what it holds.
+
+    Text the model emits alongside a tool call is streamed rather than buffered:
+    withholding it until the turn ends would stall the final answer too.
+    """
+    run = await build_agent_run(
+        project_id=request.project_id,
+        query=request.message,
+        conversation_id=conversation_id,
+        model_override=request.model,
+    )
+
+    seen_chunks: set[str] = set()
+    sources: list[dict] = []
+    search_calls = 0
+    sources_pending = True
+
+    def sources_event() -> tuple[str, dict]:
+        return "sources", {
+            "sources": list(sources),
+            "search_results_count": len(sources),
+            "token_count": run.token_count,
+        }
+
+    async for event in run.runnable.astream_events(
+        run.inputs, config=run.config or {}, version="v2"
+    ):
+        kind = event["event"]
+
+        if kind == "on_tool_end" and event.get("name") == "search_codebase":
+            search_calls += 1
+            for result in _tool_artifact(event["data"].get("output")):
+                key = f"{result.file_path}:{result.line_start}-{result.line_end}"
+                if key in seen_chunks:
+                    continue
+                seen_chunks.add(key)
+                sources.append(result_to_reference(result).model_dump())
+                sources_pending = True
+
+        elif kind == "on_chat_model_stream":
+            token = _chunk_text(event["data"].get("chunk"))
+            if not token:
+                continue
+            if sources_pending:
+                sources_pending = False
+                yield sources_event()
+            yield "token", {"token": token}
+
+    # No tokens ever streamed (or only tool calls) — the client still needs a
+    # sources event to leave its searching state.
+    if sources_pending:
+        yield sources_event()
+
+    logger.info(
+        f"Agent run finished | intent={run.intent} "
+        f"searches={search_calls} sources={len(sources)}"
+    )
 
 
 # ========================================================================
@@ -91,31 +169,16 @@ async def chat(request: ChatRequest):
             # --- Persist user message ---
             db.add_message(conversation_id, "user", request.message)
 
-            # --- Build RAG context ---
-            rag_context = await rag_service.build_context(
-                project_id=request.project_id,
-                query=request.message,
-                conversation_id=conversation_id,
-            )
-
-            # --- Send sources to client ---
-            sources_data = [s.model_dump() for s in rag_context.sources]
-            yield SSEEvent(
-                event="sources",
-                data={
-                    "sources": sources_data,
-                    "search_results_count": rag_context.search_results_count,
-                    "token_count": rag_context.token_count,
-                },
-            ).format()
-
-            # --- Stream LLM response ---
+            # --- Stream the answer through the agent ---
+            sources_data: list[dict] = []
             full_response: list[str] = []
-            async for token in llm_service.stream_chat(
-                rag_context.messages, model_override=request.model
-            ):
-                full_response.append(token)
-                yield SSEEvent(event="token", data={"token": token}).format()
+
+            async for event, data in _run_agent(request, conversation_id):
+                if event == "sources":
+                    sources_data = data["sources"]
+                elif event == "token":
+                    full_response.append(data["token"])
+                yield SSEEvent(event=event, data=data).format()
 
             # --- Persist assistant response ---
             response_text = "".join(full_response)

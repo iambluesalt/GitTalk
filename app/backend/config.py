@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     MIN_RELEVANCE_SCORE: float = 0.0
     CHUNK_OVERLAP_LINES: int = 3
 
+    # Agent
+    # Max model↔tool round trips before the graph is forced to stop.
+    AGENT_MAX_TOOL_HOPS: int = 6
+
     # Performance
     INDEXING_WORKERS: int = 4  # NOTE: indexing pipeline is currently sequential; reserved for future parallelism
 

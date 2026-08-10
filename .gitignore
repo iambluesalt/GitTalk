@@ -1,5 +1,6 @@
 .DS_Store
 .env
+*.stackdump
 /node_modules/
 
 # React Router

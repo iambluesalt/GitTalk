@@ -1,11 +1,15 @@
 """
-LLM integration service with streaming support.
-Routes between Ollama (local) and cloud APIs (OpenAI-compatible) with automatic fallback.
+LLM integration service backed by LangChain chat models.
+Routes between Ollama (local) and Groq (cloud) with automatic fallback.
 """
-import json
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Sequence
 
 import httpx
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import Runnable
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 
 from config import settings
 from logger import logger
@@ -16,19 +20,23 @@ from logger import logger
 # ============================================================================
 
 PROMPT_TEMPLATES: dict[str, str] = {
-    "code_qa": (
+    "code_agent": (
         "You are a knowledgeable code assistant for the '{project_name}' repository.\n"
-        "Answer questions about the codebase using ONLY the provided code context below.\n\n"
+        "You have tools that let you explore the repository yourself — use them before "
+        "answering anything about the code.\n\n"
+        "Tools:\n"
+        "- `search_codebase` — semantic + keyword search over the indexed code. Start here.\n"
+        "- `read_file` — read exact file contents when a snippet is truncated or you need "
+        "the surrounding code.\n"
+        "- `list_files` — list a directory when you need to find where something lives.\n\n"
         "Rules:\n"
-        "- Base your answer on the code snippets provided under '## Relevant Code'. "
-        "Each snippet is numbered [1], [2], etc. with its file path and line range.\n"
-        "- When referencing code, ALWAYS cite the source: mention the file path and line numbers "
-        "(e.g. `src/auth.py:42-58`).\n"
-        "- If you quote code, use fenced code blocks with the correct language.\n"
-        "- If the provided context does NOT contain enough information to fully answer, "
-        "say so explicitly and explain what would be needed.\n"
-        "- Do NOT make up code or file paths that aren't in the provided context.\n"
-        "- Be concise but thorough. Explain the 'why' not just the 'what'."
+        "- Search before you answer. If the first search isn't enough, search again with "
+        "different wording or read the relevant file — several tool calls per question is normal.\n"
+        "- ALWAYS cite what you used: file path and line numbers (e.g. `src/auth.py:42-58`).\n"
+        "- Never invent code, file paths, or APIs you haven't seen through a tool.\n"
+        "- If the repository genuinely doesn't contain the answer, say so explicitly and "
+        "explain what would be needed.\n"
+        "- Be concise but thorough. Explain the 'why', not just the 'what'."
     ),
     "general": (
         "You are a friendly assistant for the '{project_name}' repository.\n"
@@ -42,8 +50,46 @@ PROMPT_TEMPLATES: dict[str, str] = {
 
 def get_prompt_template(template_name: str, project_name: str = "unknown") -> str:
     """Get a system prompt by template name with project name substituted."""
-    template = PROMPT_TEMPLATES.get(template_name, PROMPT_TEMPLATES["code_qa"])
+    template = PROMPT_TEMPLATES.get(template_name, PROMPT_TEMPLATES["code_agent"])
     return template.format(project_name=project_name)
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+def _groq_base_url() -> str | None:
+    """
+    Normalise CLOUD_API_BASE_URL for the Groq SDK.
+
+    Settings hold the full OpenAI-compatible endpoint
+    (e.g. https://api.groq.com/openai/v1), but the groq client appends
+    '/openai/v1' to every request path itself — so strip that suffix to
+    avoid a doubled path. Returns None when no base URL is configured,
+    letting the SDK use its own default.
+    """
+    raw = settings.CLOUD_API_BASE_URL
+    if not raw:
+        return None
+    base = raw.rstrip("/")
+    for suffix in ("/openai/v1", "/openai"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base or None
+
+
+def _chunk_text(chunk: Any) -> str:
+    """Extract plain text from a streamed message chunk (str or content blocks)."""
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part if isinstance(part, str) else str(part.get("text", ""))
+            for part in content
+        )
+    return ""
 
 
 # ============================================================================
@@ -51,7 +97,7 @@ def get_prompt_template(template_name: str, project_name: str = "unknown") -> st
 # ============================================================================
 
 class LLMService:
-    """Routes LLM requests between Ollama and cloud providers with streaming."""
+    """Routes LLM requests between Ollama and Groq with streaming."""
 
     # ====================================================================
     # Public API
@@ -71,6 +117,40 @@ class LLMService:
             return "ollama", model_str[7:]
         return None, model_str
 
+    def get_chat_model(
+        self,
+        model_override: str | None = None,
+        tools: Sequence[Any] | None = None,
+    ) -> Runnable[Any, BaseMessage]:
+        """
+        Build the chat model for this request.
+
+        Args:
+            model_override: Optional 'provider:model' string (e.g. 'cloud:gemini-2.5-flash-lite').
+                            Overrides LLM_PROVIDER and model for this request.
+            tools: Optional tools to bind. Bound to each provider *before* fallbacks
+                   are composed — `RunnableWithFallbacks` has no `bind_tools`.
+
+        Hybrid mode returns Groq with an Ollama fallback attached — LangChain only
+        falls back if the primary fails before yielding its first chunk, which
+        matches the previous hand-rolled behaviour.
+        """
+        override_provider, override_model = self.parse_model_override(model_override)
+        provider = override_provider or settings.LLM_PROVIDER
+
+        def bind(model: BaseChatModel) -> Runnable[Any, BaseMessage]:
+            return model.bind_tools(tools) if tools else model
+
+        if provider == "ollama":
+            return bind(self._make_ollama(model=override_model))
+        if provider == "cloud":
+            return bind(self._make_groq(model=override_model))
+
+        # hybrid: cloud first (fast), Ollama as fallback
+        if self._cloud_configured():
+            return bind(self._make_groq()).with_fallbacks([bind(self._make_ollama())])
+        return bind(self._make_ollama())
+
     async def stream_chat(
         self,
         messages: list[dict[str, str]],
@@ -81,48 +161,22 @@ class LLMService:
 
         Args:
             messages: Chat messages in OpenAI format.
-            model_override: Optional 'provider:model' string (e.g. 'cloud:gemini-2.5-flash-lite').
-                            Overrides LLM_PROVIDER and model for this request.
-
-        Hybrid mode: tries cloud first (fast), falls back to Ollama on failure.
+            model_override: Optional 'provider:model' string.
         """
-        override_provider, override_model = self.parse_model_override(model_override)
-        provider = override_provider or settings.LLM_PROVIDER
-
-        if provider == "ollama":
-            async for token in self._stream_ollama(messages, model=override_model):
-                yield token
-        elif provider == "cloud":
-            async for token in self._stream_cloud(messages, model=override_model):
-                yield token
-        elif provider == "hybrid":
-            # Cloud first (fast), Ollama as fallback
-            cloud_configured = bool(
-                settings.CLOUD_API_KEY and settings.CLOUD_API_BASE_URL
-            )
-            if cloud_configured:
-                yield_started = False
-                try:
-                    async for token in self._stream_cloud(messages):
-                        yield_started = True
-                        yield token
-                    return
-                except Exception as e:
-                    if yield_started:
-                        raise
-                    logger.warning(f"Cloud API failed, falling back to Ollama: {e}")
-            # Ollama fallback
-            async for token in self._stream_ollama(messages):
+        model = self.get_chat_model(model_override)
+        async for chunk in model.astream(messages):
+            token = _chunk_text(chunk)
+            if token:
                 yield token
 
     async def generate_title(self, user_message: str) -> str:
         """
         Generate a short conversation title using the fast Ollama model.
 
-        Uses a non-streaming /api/generate call so the result is available
-        immediately after the main response stream finishes. Falls back
-        gracefully to the first 60 chars of the user message if the fast
-        model is unavailable or the call times out.
+        Non-streaming so the result is available immediately after the main
+        response stream finishes. Falls back gracefully to the first 60 chars
+        of the user message if the fast model is unavailable or the call
+        times out.
         """
         prompt = (
             "Generate a concise 4-7 word title for this conversation.\n"
@@ -130,22 +184,17 @@ class LLMService:
             "Reply with ONLY the title — no quotes, no punctuation at the end, no explanation."
         )
         try:
-            payload = {
-                "model": settings.OLLAMA_FAST_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.3, "num_predict": 20},
-            }
-            timeout = httpx.Timeout(10.0, connect=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    f"{settings.OLLAMA_BASE_URL}/api/generate",
-                    json=payload,
-                )
-                resp.raise_for_status()
-                title = resp.json().get("response", "").strip().strip("\"'").strip()
-                if title and len(title) <= 80:
-                    return title
+            model = ChatOllama(
+                model=settings.OLLAMA_FAST_MODEL,
+                base_url=settings.OLLAMA_BASE_URL,
+                temperature=0.3,
+                num_predict=20,
+                client_kwargs={"timeout": 10.0},
+            )
+            result = await model.ainvoke(prompt)
+            title = _chunk_text(result).strip().strip("\"'").strip()
+            if title and len(title) <= 80:
+                return title
         except Exception as e:
             logger.debug(f"Title generation failed ({settings.OLLAMA_FAST_MODEL}): {e}")
 
@@ -172,9 +221,7 @@ class LLMService:
             pass
 
         # Check cloud — just config presence (no network call)
-        status["cloud"] = bool(
-            settings.CLOUD_API_KEY and settings.CLOUD_API_BASE_URL
-        )
+        status["cloud"] = self._cloud_configured()
 
         return status
 
@@ -187,7 +234,7 @@ class LLMService:
         models: list[dict[str, str]] = []
 
         # Cloud model (if configured)
-        if settings.CLOUD_API_KEY and settings.CLOUD_API_BASE_URL and settings.CLOUD_MODEL:
+        if self._cloud_configured() and settings.CLOUD_MODEL:
             provider_label = settings.CLOUD_API_PROVIDER or "Cloud"
             models.append({
                 "id": f"cloud:{settings.CLOUD_MODEL}",
@@ -219,94 +266,33 @@ class LLMService:
         return models
 
     # ====================================================================
-    # Ollama Backend — /api/chat (NDJSON streaming)
+    # Model construction
     # ====================================================================
 
-    async def _stream_ollama(
-        self,
-        messages: list[dict[str, str]],
-        model: str | None = None,
-    ) -> AsyncGenerator[str, None]:
-        """Stream tokens from Ollama /api/chat."""
-        url = f"{settings.OLLAMA_BASE_URL}/api/chat"
-        payload = {
-            "model": model or settings.OLLAMA_MODEL,
-            "messages": messages,
-            "stream": True,
-        }
+    def _cloud_configured(self) -> bool:
+        return bool(settings.CLOUD_API_KEY and settings.CLOUD_API_BASE_URL)
 
-        timeout = httpx.Timeout(settings.OLLAMA_TIMEOUT, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, json=payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+    def _make_ollama(self, model: str | None = None) -> ChatOllama:
+        """Build a ChatOllama client for the local Ollama server."""
+        return ChatOllama(
+            model=model or settings.OLLAMA_MODEL,
+            base_url=settings.OLLAMA_BASE_URL,
+            client_kwargs={"timeout": float(settings.OLLAMA_TIMEOUT)},
+        )
 
-                    if data.get("done"):
-                        break
-
-                    token = data.get("message", {}).get("content", "")
-                    if token:
-                        yield token
-
-    # ====================================================================
-    # Cloud Backend — OpenAI-compatible /chat/completions (SSE streaming)
-    # ====================================================================
-
-    async def _stream_cloud(
-        self,
-        messages: list[dict[str, str]],
-        model: str | None = None,
-    ) -> AsyncGenerator[str, None]:
-        """Stream tokens from an OpenAI-compatible chat completions endpoint."""
-        if not settings.CLOUD_API_KEY or not settings.CLOUD_API_BASE_URL:
+    def _make_groq(self, model: str | None = None) -> ChatGroq:
+        """Build a ChatGroq client from the CLOUD_* settings."""
+        if not self._cloud_configured():
             raise RuntimeError(
                 "Cloud API not configured (set CLOUD_API_KEY and CLOUD_API_BASE_URL)"
             )
-
-        base_url = settings.CLOUD_API_BASE_URL.rstrip("/")
-        url = f"{base_url}/chat/completions"
-
-        headers = {
-            "Authorization": f"Bearer {settings.CLOUD_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model or settings.CLOUD_MODEL,
-            "messages": messages,
-            "stream": True,
-        }
-
-        timeout = httpx.Timeout(settings.CLOUD_TIMEOUT, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST", url, json=payload, headers=headers
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        break
-
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-
-                    choices = data.get("choices", [])
-                    if choices:
-                        token = choices[0].get("delta", {}).get("content", "")
-                        if token:
-                            yield token
+        return ChatGroq(
+            model=model or settings.CLOUD_MODEL,
+            api_key=settings.CLOUD_API_KEY,
+            base_url=_groq_base_url(),
+            timeout=float(settings.CLOUD_TIMEOUT),
+            streaming=True,
+        )
 
 
 # Global instance

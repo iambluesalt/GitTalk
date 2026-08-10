@@ -250,10 +250,16 @@ async def test_chat_project_not_indexed(client, test_db, tmp_path, monkeypatch):
     assert b"error" in r.content
 
 
-async def test_chat_streams_tokens(client, test_db, tmp_path, monkeypatch):
-    """Happy path: chat returns sources + tokens + done events."""
-    from models import ProjectStatus
-    from services.rag_service import RAGContext
+async def test_chat_streams_agent_events(client, test_db, tmp_path, monkeypatch):
+    """The agent's graph events translate into the chat SSE schema.
+
+    Tool results become one cumulative `sources` event emitted before the first
+    token, so the frontend's searching state clears at the right time.
+    """
+    from langchain_core.messages import AIMessageChunk, ToolMessage
+
+    from models import SearchResult
+    from services.agent_graph import AgentRun
 
     pid = str(uuid.uuid4())
     meta = _make_project_meta(pid, tmp_path / "r", status="indexed")
@@ -261,34 +267,51 @@ async def test_chat_streams_tokens(client, test_db, tmp_path, monkeypatch):
 
     monkeypatch.setattr("routes.chat.db", test_db)
 
-    mock_rag = MagicMock()
-    mock_rag.build_context = AsyncMock(return_value=RAGContext(
-        messages=[{"role": "user", "content": "test"}],
-        sources=[],
-        token_count=10,
-        search_results_count=0,
-    ))
-    monkeypatch.setattr("routes.chat.rag_service", mock_rag)
+    result = SearchResult(
+        chunk_id="c1", text="def login(): ...", file_path="app/auth.py",
+        language="python", line_start=1, line_end=5, chunk_type="function",
+        relevance_score=0.9,
+    )
 
-    async def _fake_stream(messages, model_override=None):
-        for tok in ["Hello", " world"]:
-            yield tok
+    class FakeGraph:
+        async def astream_events(self, inputs, config=None, version=None):
+            yield {
+                "event": "on_tool_end",
+                "name": "search_codebase",
+                "data": {"output": ToolMessage(
+                    content="formatted", tool_call_id="t1", artifact=[result]
+                )},
+            }
+            for tok in ["Hello", " world"]:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": AIMessageChunk(content=tok)},
+                }
+
+    async def _fake_build(**kwargs):
+        return AgentRun(
+            runnable=FakeGraph(), inputs={"messages": []},
+            intent="code", uses_tools=True, token_count=99,
+        )
+
+    monkeypatch.setattr("routes.chat.build_agent_run", _fake_build)
 
     mock_llm = MagicMock()
-    mock_llm.stream_chat = _fake_stream
+    mock_llm.generate_title = AsyncMock(return_value="A title")
     monkeypatch.setattr("routes.chat.llm_service", mock_llm)
 
     r = await client.post("/api/chat", json={
         "project_id": pid,
-        "message": "what is this?",
+        "message": "how does auth work?",
     })
 
     assert r.status_code == 200
     content = r.text
-    assert "sources" in content
-    assert "token" in content
-    assert "done" in content
+    # sources must precede the first token
+    assert content.index("event: sources") < content.index("event: token")
+    assert "app/auth.py" in content
     assert "Hello" in content
+    assert "done" in content
 
 
 async def test_chat_invalid_empty_message(client):
