@@ -1,0 +1,74 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Backend: Run",
+      "type": "shell",
+      "command": "python main.py",
+      "windows": {
+        "command": "${workspaceFolder}\\app\\venv\\Scripts\\python.exe main.py"
+      },
+      "linux": {
+        "command": "${workspaceFolder}/app/venv/bin/python main.py"
+      },
+      "osx": {
+        "command": "${workspaceFolder}/app/venv/bin/python main.py"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/app/backend"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^never matches$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "Uvicorn running on|Application startup complete"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "gittalkDevServers",
+        "clear": true
+      }
+    },
+    {
+      "label": "Frontend: Run",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^never matches$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "Local:|ready in"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "gittalkDevServers",
+        "clear": true
+      }
+    },
+    {
+      "label": "Run All (Backend + Frontend)",
+      "dependsOn": ["Backend: Run", "Frontend: Run"],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}

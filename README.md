@@ -122,6 +122,8 @@ npm run dev
 # → http://localhost:5173
 ```
 
+**Or, in VS Code:** run the **`Run All (Backend + Frontend)`** task (`Ctrl+Shift+P` → `Tasks: Run Task` → `Run All (Backend + Frontend)`, or `Ctrl+Shift+B`) to start both servers at once in separate terminal panels. Individual `Backend: Run` / `Frontend: Run` tasks are also available if you only need one. Defined in `.vscode/tasks.json`; the backend task assumes the venv lives at `app/venv` (per the setup steps above).
+
 Open [http://localhost:5173](http://localhost:5173) and paste any public GitHub URL to get started.
 
 ---
