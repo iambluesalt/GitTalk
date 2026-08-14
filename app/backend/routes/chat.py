@@ -34,6 +34,28 @@ def _tool_artifact(output: Any) -> list:
     return artifact or []
 
 
+# Tools the agent can call that should be surfaced to the client as live
+# activity — keep in sync with services/agent_tools.py's @tool functions.
+_VISIBLE_TOOLS = {"search_codebase", "read_file", "list_files"}
+
+
+def _tool_label(tool_name: str, tool_input: dict) -> str:
+    """Human-readable description of a tool call, for the activity feed."""
+    if tool_name == "search_codebase":
+        query = (tool_input.get("query") or "").strip()
+        return f"Searching codebase for “{query}”" if query else "Searching codebase"
+    if tool_name == "read_file":
+        path = tool_input.get("path") or "?"
+        start, end = tool_input.get("line_start"), tool_input.get("line_end")
+        if start and end:
+            return f"Reading {path}:{start}-{end}"
+        return f"Reading {path}"
+    if tool_name == "list_files":
+        directory = tool_input.get("dir") or "/"
+        return f"Listing {directory}"
+    return tool_name
+
+
 async def _run_agent(request: ChatRequest, conversation_id: str) -> StreamEvents:
     """The model searches and reads the repo on its own, possibly several times,
     before answering.
@@ -57,6 +79,10 @@ async def _run_agent(request: ChatRequest, conversation_id: str) -> StreamEvents
     sources: list[dict] = []
     search_calls = 0
     sources_pending = True
+    tool_seq = 0
+    # tool_start's run_id -> the seq we assigned it, so tool_end can report
+    # completion of the same activity-feed entry instead of a new one.
+    active_calls: dict[str, int] = {}
 
     def sources_event() -> tuple[str, dict]:
         return "sources", {
@@ -69,16 +95,34 @@ async def _run_agent(request: ChatRequest, conversation_id: str) -> StreamEvents
         run.inputs, config=run.config or {}, version="v2"
     ):
         kind = event["event"]
+        name = event.get("name")
 
-        if kind == "on_tool_end" and event.get("name") == "search_codebase":
-            search_calls += 1
-            for result in _tool_artifact(event["data"].get("output")):
-                key = f"{result.file_path}:{result.line_start}-{result.line_end}"
-                if key in seen_chunks:
-                    continue
-                seen_chunks.add(key)
-                sources.append(result_to_reference(result).model_dump())
-                sources_pending = True
+        if kind == "on_tool_start" and name in _VISIBLE_TOOLS:
+            tool_seq += 1
+            active_calls[event["run_id"]] = tool_seq
+            tool_input = event["data"].get("input") or {}
+            yield "tool_call", {
+                "seq": tool_seq,
+                "tool": name,
+                "label": _tool_label(name, tool_input),
+                "status": "start",
+            }
+
+        elif kind == "on_tool_end" and name in _VISIBLE_TOOLS:
+            if name == "search_codebase":
+                search_calls += 1
+                for result in _tool_artifact(event["data"].get("output")):
+                    key = f"{result.file_path}:{result.line_start}-{result.line_end}"
+                    if key in seen_chunks:
+                        continue
+                    seen_chunks.add(key)
+                    sources.append(result_to_reference(result).model_dump())
+                    sources_pending = True
+            yield "tool_call", {
+                "seq": active_calls.get(event["run_id"], 0),
+                "tool": name,
+                "status": "end",
+            }
 
         elif kind == "on_chat_model_stream":
             token = _chunk_text(event["data"].get("chunk"))
@@ -121,10 +165,12 @@ async def chat(request: ChatRequest):
     Send a message and receive a streaming LLM response.
 
     SSE event types:
-      - sources:  code references used for context (sent first)
-      - token:    individual LLM response tokens
-      - done:     final event with metadata (conversation_id, response_time_ms)
-      - error:    error description
+      - tool_call: agent tool activity (search_codebase / read_file / list_files),
+                   emitted live as each call starts and ends
+      - sources:   code references used for context (sent before the first token)
+      - token:     individual LLM response tokens
+      - done:      final event with metadata (conversation_id, response_time_ms)
+      - error:     error description
     """
 
     async def event_stream():

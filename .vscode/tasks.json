@@ -4,15 +4,15 @@
     {
       "label": "Backend: Run",
       "type": "shell",
-      "command": "python main.py",
+      "command": "while true; do python main.py; ec=$?; echo \"[backend] exited with code $ec — restarting in 1s\"; sleep 1; done",
       "windows": {
-        "command": "${workspaceFolder}\\app\\venv\\Scripts\\python.exe main.py"
+        "command": "while true; do \"${workspaceFolder}\\app\\venv\\Scripts\\python.exe\" main.py; ec=$?; echo \"[backend] exited with code $ec — restarting in 1s\"; sleep 1; done"
       },
       "linux": {
-        "command": "${workspaceFolder}/app/venv/bin/python main.py"
+        "command": "while true; do ${workspaceFolder}/app/venv/bin/python main.py; ec=$?; echo \"[backend] exited with code $ec — restarting in 1s\"; sleep 1; done"
       },
       "osx": {
-        "command": "${workspaceFolder}/app/venv/bin/python main.py"
+        "command": "while true; do ${workspaceFolder}/app/venv/bin/python main.py; ec=$?; echo \"[backend] exited with code $ec — restarting in 1s\"; sleep 1; done"
       },
       "options": {
         "cwd": "${workspaceFolder}/app/backend"

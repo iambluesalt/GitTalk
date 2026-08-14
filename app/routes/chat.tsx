@@ -27,6 +27,7 @@ import type {
   CodeReference,
   HealthResponse,
   ChatModel,
+  ToolCall,
 } from "~/lib/types";
 import {
   getProject,
@@ -51,6 +52,7 @@ interface ChatEntry {
   role: "user" | "assistant";
   content: string;
   sources?: CodeReference[];
+  toolCalls?: ToolCall[];
   isStreaming?: boolean;
   isSearching?: boolean;
   error?: ReturnType<typeof humanizeError>;
@@ -206,6 +208,26 @@ export default function Chat() {
 
       for await (const msg of parseSSEStream(response)) {
         switch (msg.event) {
+          case "tool_call": {
+            const call = msg.data as unknown as ToolCall;
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last.role !== "assistant") return prev;
+              const calls = last.toolCalls ? [...last.toolCalls] : [];
+              const idx = calls.findIndex((c) => c.seq === call.seq);
+              if (idx === -1) {
+                calls.push(call);
+              } else {
+                // "end" event omits label — keep the one from "start"
+                calls[idx] = { ...calls[idx], status: call.status };
+              }
+              next[next.length - 1] = { ...last, toolCalls: calls, isSearching: false };
+              return next;
+            });
+            break;
+          }
+
           case "sources":
             currentSources = (msg.data.sources || []) as CodeReference[];
             setMessages((prev) => {
@@ -557,6 +579,7 @@ export default function Chat() {
                       role={msg.role}
                       content={msg.content}
                       sources={msg.sources}
+                      toolCalls={msg.toolCalls}
                       isStreaming={msg.isStreaming}
                       isSearching={msg.isSearching}
                     />

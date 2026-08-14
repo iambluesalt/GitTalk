@@ -2,11 +2,15 @@
 GitHub repository clone service with progress streaming.
 """
 import asyncio
+import collections
 import json
 import os
+import queue
 import stat
 import shutil
 import re
+import subprocess
+import threading
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -109,100 +113,141 @@ class CloneService:
             data={"message": "Starting clone...", "phase": "clone"}
         ).format()
 
-        process = None
+        # Run git as a blocking subprocess in a worker thread rather than via
+        # asyncio.create_subprocess_exec — on Windows, uvicorn's ProactorEventLoop
+        # can hard-crash the interpreter (SIGSEGV) reading overlapped subprocess
+        # pipes under git's rapid \r-progress output. A plain thread + blocking
+        # reads sidesteps IOCP entirely.
+        loop = asyncio.get_running_loop()
+        events: "queue.Queue[tuple[str, object]]" = queue.Queue()
+
+        worker = threading.Thread(
+            target=self._run_git_clone,
+            args=(clone_url, clone_dir, timeout, events),
+            daemon=True,
+        )
+        worker.start()
+
+        last_percent = -1
         try:
-            process = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth", "1", "--progress", clone_url, str(clone_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            while True:
+                kind, payload = await loop.run_in_executor(None, events.get)
+
+                if kind == "line":
+                    progress = self._parse_git_progress(payload)
+                    if progress:
+                        pct = progress.get("percent", -1)
+                        if pct != last_percent:
+                            last_percent = pct
+                            yield SSEEvent(event="progress", data=progress).format()
+
+                elif kind == "not_found":
+                    yield SSEEvent(
+                        event="error",
+                        data={"message": "git is not installed or not in PATH"}
+                    ).format()
+                    return
+
+                elif kind == "timeout":
+                    if clone_dir.exists():
+                        safe_rmtree(clone_dir)
+                    yield SSEEvent(
+                        event="error",
+                        data={"message": f"Clone timed out after {timeout}s"}
+                    ).format()
+                    return
+
+                elif kind == "exception":
+                    logger.error(f"Clone error: {payload}")
+                    if clone_dir.exists():
+                        safe_rmtree(clone_dir)
+                    yield SSEEvent(
+                        event="error",
+                        data={"message": f"Clone failed: {payload}"}
+                    ).format()
+                    return
+
+                elif kind == "done":
+                    returncode, tail = payload
+                    if returncode != 0:
+                        if clone_dir.exists():
+                            safe_rmtree(clone_dir)
+                        yield SSEEvent(
+                            event="error",
+                            data={"message": f"Git clone failed: {tail}"}
+                        ).format()
+                        return
+
+                    yield SSEEvent(
+                        event="status",
+                        data={"message": "Clone completed", "phase": "clone_done"}
+                    ).format()
+                    return
+        finally:
+            worker.join(timeout=5)
+
+    def _run_git_clone(
+        self,
+        clone_url: str,
+        clone_dir: Path,
+        timeout: int,
+        events: "queue.Queue[tuple[str, object]]",
+    ) -> None:
+        """Run `git clone` synchronously in a worker thread, pushing progress lines
+        and the final result onto `events` for the async generator to consume."""
+        try:
+            process = subprocess.Popen(
+                ["git", "clone", "--depth", "1", "--progress", clone_url, str(clone_dir)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
-
-            # Git writes progress to stderr
-            last_percent = -1
-            async for line in self._read_stderr(process):
-                progress = self._parse_git_progress(line)
-                if progress:
-                    # Only yield if percentage changed to avoid flooding
-                    pct = progress.get("percent", -1)
-                    if pct != last_percent:
-                        last_percent = pct
-                        yield SSEEvent(event="progress", data=progress).format()
-
-            try:
-                await asyncio.wait_for(process.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                # Cleanup partial clone
-                if clone_dir.exists():
-                    safe_rmtree(clone_dir)
-                yield SSEEvent(
-                    event="error",
-                    data={"message": f"Clone timed out after {timeout}s"}
-                ).format()
-                return
-
-            if process.returncode != 0:
-                stderr_remaining = ""
-                if process.stderr:
-                    remaining = await process.stderr.read()
-                    stderr_remaining = remaining.decode("utf-8", errors="replace")
-                # Cleanup partial clone
-                if clone_dir.exists():
-                    safe_rmtree(clone_dir)
-                yield SSEEvent(
-                    event="error",
-                    data={"message": f"Git clone failed: {stderr_remaining.strip()}"}
-                ).format()
-                return
-
-            yield SSEEvent(
-                event="status",
-                data={"message": "Clone completed", "phase": "clone_done"}
-            ).format()
-
         except FileNotFoundError:
-            yield SSEEvent(
-                event="error",
-                data={"message": "git is not installed or not in PATH"}
-            ).format()
-        except Exception as e:
-            logger.error(f"Clone error: {e}")
-            # Cleanup partial clone
-            if clone_dir.exists():
-                safe_rmtree(clone_dir)
-            yield SSEEvent(
-                event="error",
-                data={"message": f"Clone failed: {str(e)}"}
-            ).format()
-
-    async def _read_stderr(self, process: asyncio.subprocess.Process) -> AsyncGenerator[str, None]:
-        """Read lines from process stderr, handling git's carriage-return progress."""
-        if not process.stderr:
+            events.put(("not_found", None))
             return
+        except Exception as e:
+            events.put(("exception", str(e)))
+            return
+
+        tail_lines: collections.deque = collections.deque(maxlen=20)
         buffer = b""
-        while True:
-            chunk = await process.stderr.read(256)
-            if not chunk:
-                if buffer:
-                    yield buffer.decode("utf-8", errors="replace")
-                break
-            buffer += chunk
-            # Git uses \r for progress updates and \n for final messages
-            while b"\r" in buffer or b"\n" in buffer:
-                # Find the earliest line break
-                r_idx = buffer.find(b"\r")
-                n_idx = buffer.find(b"\n")
-                if r_idx == -1:
-                    idx = n_idx
-                elif n_idx == -1:
-                    idx = r_idx
-                else:
-                    idx = min(r_idx, n_idx)
-                line = buffer[:idx].decode("utf-8", errors="replace")
-                buffer = buffer[idx + 1:]
-                if line.strip():
-                    yield line.strip()
+        try:
+            while True:
+                chunk = process.stderr.read(256)
+                if not chunk:
+                    break
+                buffer += chunk
+                # Git uses \r for progress updates and \n for final messages
+                while b"\r" in buffer or b"\n" in buffer:
+                    r_idx = buffer.find(b"\r")
+                    n_idx = buffer.find(b"\n")
+                    if r_idx == -1:
+                        idx = n_idx
+                    elif n_idx == -1:
+                        idx = r_idx
+                    else:
+                        idx = min(r_idx, n_idx)
+                    line = buffer[:idx].decode("utf-8", errors="replace")
+                    buffer = buffer[idx + 1:]
+                    if line.strip():
+                        tail_lines.append(line.strip())
+                        events.put(("line", line.strip()))
+            if buffer.strip():
+                tail_lines.append(buffer.decode("utf-8", errors="replace").strip())
+        except Exception as e:
+            events.put(("exception", str(e)))
+            process.kill()
+            process.wait()
+            return
+
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            events.put(("timeout", None))
+            return
+
+        events.put(("done", (returncode, "\n".join(tail_lines))))
 
     def _parse_git_progress(self, line: str) -> Optional[dict]:
         """

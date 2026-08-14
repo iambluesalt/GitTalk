@@ -6,6 +6,8 @@ Supports incremental re-indexing via file hash tracking.
 import asyncio
 import hashlib
 import time
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -19,6 +21,58 @@ from services.chunker_service import code_chunker, CodeChunk
 from services.embedding_service import embedding_service
 from services.repomap_service import repomap_service
 from utils.exclusions import load_gitignore_patterns, should_exclude
+
+
+def _parse_and_chunk_worker(file_path_str: str, clone_dir_str: str) -> list[CodeChunk]:
+    """Parse and chunk one file. Runs in a worker subprocess.
+
+    Module-level (not a bound method) so it can be pickled and sent to a
+    ProcessPoolExecutor. Some tree-sitter grammars can hard-crash (native
+    access violation, not a catchable Python exception) on pathological
+    input — running this in a subprocess means only that subprocess dies,
+    not the whole server.
+    """
+    file_path = Path(file_path_str)
+    clone_dir = Path(clone_dir_str)
+    rel_path = file_path.relative_to(clone_dir).as_posix()
+    ext = file_path.suffix.lower()
+
+    try:
+        source_bytes = file_path.read_bytes()
+    except Exception as e:
+        logger.debug(f"Cannot read {rel_path}: {e}")
+        return []
+
+    if not source_bytes.strip():
+        return []
+
+    # Try tree-sitter parsing
+    tree = treesitter_service.parse_file(str(file_path), source_bytes, ext)
+
+    # Chunk (tree may be None for non-parseable files — chunker handles this)
+    return code_chunker.chunk_file(rel_path, ext, source_bytes, tree)
+
+
+def _repo_map_entry_worker(file_path_str: str, clone_dir_str: str) -> tuple[str, list[tuple[str, str]]]:
+    """Parse one file's repo-map entry in a worker subprocess (see
+    _parse_and_chunk_worker docstring — same tree-sitter crash risk applies
+    here, since repomap_service.process_file() also does real tree-sitter
+    parsing, just for a signature summary instead of chunks).
+    """
+    from services.repomap_service import repomap_service
+    return repomap_service.process_file(Path(file_path_str), Path(clone_dir_str))
+
+
+# Lazily-created pool for isolated parsing. Kept at module level (like the
+# other service singletons) rather than per-IndexingService-instance.
+_parse_pool: ProcessPoolExecutor | None = None
+
+
+def _get_parse_pool() -> ProcessPoolExecutor:
+    global _parse_pool
+    if _parse_pool is None:
+        _parse_pool = ProcessPoolExecutor(max_workers=1)
+    return _parse_pool
 
 
 class IndexingService:
@@ -185,8 +239,9 @@ class IndexingService:
                         },
                     ).format()
 
-                # Parse and chunk the file
-                chunks = await asyncio.to_thread(self._parse_and_chunk, file_path, clone_dir)
+                # Parse and chunk the file, isolated in a subprocess (see
+                # _parse_and_chunk_worker docstring)
+                chunks = await self._parse_and_chunk_isolated(file_path, clone_dir)
                 if not chunks:
                     file_hash_map[rel_path] = file_hash
                     file_chunk_map[rel_path] = []
@@ -252,6 +307,17 @@ class IndexingService:
                 event="error",
                 data={"message": f"Indexing failed: {str(e)}"},
             ).format()
+        finally:
+            # If the generator is torn down some other way — client
+            # disconnect, server shutdown — neither the success path nor the
+            # `except` above runs, and the project would stay stuck on
+            # INDEXING forever (blocking any future re-index attempt). Only
+            # touch it if it's still unresolved; success already moved it to
+            # INDEXED and the except above already moved it to ERROR.
+            project = db.get_project(project_id)
+            if project and project.status == ProjectStatus.INDEXING:
+                logger.warning(f"Indexing for {project_id} ended without resolving status — marking as error")
+                db.update_project_error(project_id, "Indexing was interrupted (connection closed or server stopped)")
 
     def _collect_files(
         self, clone_dir: Path, gitignore_patterns: list[str]
@@ -283,28 +349,32 @@ class IndexingService:
         except Exception:
             return ""
 
-    def _parse_and_chunk(
+    async def _parse_and_chunk_isolated(
         self, file_path: Path, clone_dir: Path
     ) -> list[CodeChunk]:
-        """Parse a file with tree-sitter and chunk it."""
-        rel_path = file_path.relative_to(clone_dir).as_posix()
-        ext = file_path.suffix.lower()
+        """Parse and chunk one file in the isolated worker subprocess.
 
+        If the worker process crashes (e.g. a native tree-sitter grammar
+        bug), the pool is marked broken — log it, drop that file, and
+        rebuild the pool so subsequent files aren't affected.
+        """
+        loop = asyncio.get_running_loop()
         try:
-            source_bytes = file_path.read_bytes()
-        except Exception as e:
-            logger.debug(f"Cannot read {rel_path}: {e}")
+            return await loop.run_in_executor(
+                _get_parse_pool(),
+                _parse_and_chunk_worker,
+                str(file_path),
+                str(clone_dir),
+            )
+        except BrokenProcessPool:
+            rel_path = file_path.relative_to(clone_dir).as_posix()
+            logger.error(
+                f"Parser crashed on '{rel_path}' — skipping this file. "
+                "Likely a native tree-sitter grammar bug on this file's content."
+            )
+            global _parse_pool
+            _parse_pool = None  # rebuilt lazily on next call
             return []
-
-        if not source_bytes.strip():
-            return []
-
-        # Try tree-sitter parsing
-        tree = treesitter_service.parse_file(str(file_path), source_bytes, ext)
-
-        # Chunk (tree may be None for non-parseable files — chunker handles this)
-        chunks = code_chunker.chunk_file(rel_path, ext, source_bytes, tree)
-        return chunks
 
     async def _embed_and_store(
         self, project_id: str, chunks: list[CodeChunk]
@@ -363,7 +433,7 @@ class IndexingService:
 
         # Generate repo map
         try:
-            repo_map = repomap_service.generate_repo_map(project_id, clone_dir)
+            repo_map = await self._generate_repo_map_isolated(project_id, clone_dir)
             db.update_project_repo_map(project_id, repo_map)
         except Exception as e:
             logger.warning(f"Failed to generate repo map: {e}")
@@ -377,6 +447,33 @@ class IndexingService:
             f"Indexing complete for {project_id}: "
             f"{files_processed} files, {chunks_created} chunks, {duration}s"
         )
+
+    async def _generate_repo_map_isolated(self, project_id: str, clone_dir: Path) -> str:
+        """Same output as repomap_service.generate_repo_map(), but each file's
+        tree-sitter parse runs in the isolated worker subprocess. If a file
+        crashes the worker, only that file's entry is dropped — the pool is
+        rebuilt and the rest of the repo map still completes.
+        """
+        loop = asyncio.get_running_loop()
+        entries: list[tuple[str, list[tuple[str, str]]]] = []
+
+        for file_path in repomap_service.iter_files(clone_dir):
+            try:
+                entry = await loop.run_in_executor(
+                    _get_parse_pool(), _repo_map_entry_worker,
+                    str(file_path), str(clone_dir),
+                )
+            except BrokenProcessPool:
+                rel_path = file_path.relative_to(clone_dir).as_posix()
+                logger.error(
+                    f"Repo map parser crashed on '{rel_path}' — skipping this file's entry."
+                )
+                global _parse_pool
+                _parse_pool = None
+                entry = (rel_path, [])
+            entries.append(entry)
+
+        return repomap_service.format_entries(project_id, entries)
 
     def _complete_event(
         self,

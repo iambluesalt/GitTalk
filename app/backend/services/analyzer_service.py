@@ -3,12 +3,47 @@ Repository analysis service.
 Walks directory trees, counts files/LOC, detects languages.
 Uses tree-sitter for function/class/import counting on supported languages.
 """
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 from logger import logger
 from models import RepositoryAnalysis, LanguageStats
 from services.treesitter_service import treesitter_service
 from utils.exclusions import load_gitignore_patterns, should_exclude
+
+
+def _extract_counts_worker(file_path_str: str, ext: str, ts_lang: str) -> tuple[int, int, int]:
+    """Parse one file's function/class/import counts in a worker subprocess.
+
+    Some tree-sitter grammars can hard-crash (native access violation / heap
+    corruption, not a catchable Python exception) on pathological input —
+    confirmed in practice on this project. Isolating each parse in its own
+    subprocess means only that subprocess dies, not the whole server, the
+    same pattern indexing_service uses for chunking.
+    """
+    try:
+        source_bytes = Path(file_path_str).read_bytes()
+        tree = treesitter_service.parse_file(file_path_str, source_bytes, ext)
+        if not tree:
+            return (0, 0, 0)
+        funcs, classes, imports = treesitter_service.extract_all(tree, source_bytes, ts_lang)
+        return (len(funcs), len(classes), len(imports))
+    except Exception:
+        return (0, 0, 0)
+
+
+# Lazily-created pool for isolated parsing, mirroring indexing_service's pool.
+# Kept separate (rather than shared) since analysis runs in its own pipeline
+# stage, right after clone and before indexing.
+_analyze_pool: ProcessPoolExecutor | None = None
+
+
+def _get_analyze_pool() -> ProcessPoolExecutor:
+    global _analyze_pool
+    if _analyze_pool is None:
+        _analyze_pool = ProcessPoolExecutor(max_workers=1)
+    return _analyze_pool
 
 
 # Extension-to-language mapping — each variant gets its own entry for visibility
@@ -135,21 +170,24 @@ class AnalyzerService:
                 stats.file_count += 1
                 stats.lines_of_code += line_count
 
-                # AST-level counts for tree-sitter supported languages
+                # AST-level counts for tree-sitter supported languages —
+                # isolated in a worker subprocess (see _extract_counts_worker)
                 ts_lang = _ANALYSIS_TO_TS_LANG.get(language) or treesitter_service.get_lang_name(ext)
                 if ts_lang:
                     try:
-                        source_bytes = file_path.read_bytes()
-                        tree = treesitter_service.parse_file(
-                            str(file_path), source_bytes, ext
+                        funcs_n, classes_n, imports_n = _get_analyze_pool().submit(
+                            _extract_counts_worker, str(file_path), ext, ts_lang
+                        ).result()
+                        stats.functions += funcs_n
+                        stats.classes += classes_n
+                        stats.imports += imports_n
+                    except BrokenProcessPool:
+                        logger.error(
+                            f"Analyzer parser crashed on '{file_path.name}' — "
+                            "skipping AST counts for this file."
                         )
-                        if tree:
-                            funcs, classes, imports = treesitter_service.extract_all(
-                                tree, source_bytes, ts_lang
-                            )
-                            stats.functions += len(funcs)
-                            stats.classes += len(classes)
-                            stats.imports += len(imports)
+                        global _analyze_pool
+                        _analyze_pool = None
                     except Exception:
                         pass
 

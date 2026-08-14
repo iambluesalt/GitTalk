@@ -13,19 +13,28 @@ import {
   Search,
   Brain,
   Loader2,
+  FolderOpen,
+  CheckCircle2,
 } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { cn } from "~/lib/utils";
-import type { CodeReference } from "~/lib/types";
+import type { CodeReference, ToolCall } from "~/lib/types";
 
 interface ChatMessageProps {
   role: "user" | "assistant";
   content: string;
   sources?: CodeReference[];
+  toolCalls?: ToolCall[];
   isStreaming?: boolean;
   isSearching?: boolean;
   className?: string;
 }
+
+const TOOL_ICONS: Record<ToolCall["tool"], typeof Search> = {
+  search_codebase: Search,
+  read_file: FileCode2,
+  list_files: FolderOpen,
+};
 
 /**
  * Parse <think>...</think> blocks from reasoning models.
@@ -75,6 +84,7 @@ export default function ChatMessage({
   role,
   content,
   sources,
+  toolCalls,
   isStreaming,
   isSearching,
   className,
@@ -117,8 +127,39 @@ export default function ChatMessage({
           isUser ? "items-end" : "items-start"
         )}
       >
-        {/* Retrieval indicator — shown while searching or when sources arrive during streaming */}
-        {!isUser && isSearching && (
+        {/* Tool activity trail — live view of what the agent is doing (searching,
+            reading files, listing directories), each line updates in place as
+            calls start and finish */}
+        {!isUser && toolCalls && toolCalls.length > 0 && (
+          <div className="flex flex-col gap-1 mb-2 animate-fade-in">
+            {toolCalls.map((call) => {
+              const Icon = TOOL_ICONS[call.tool] || Search;
+              const running = call.status === "start";
+              return (
+                <div
+                  key={call.seq}
+                  className={cn(
+                    "flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition-colors",
+                    running
+                      ? "bg-accent/5 border-accent/10 text-accent"
+                      : "bg-surface border-border-subtle text-text-muted"
+                  )}
+                >
+                  {running ? (
+                    <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-green/70" />
+                  )}
+                  <Icon className="w-3 h-3 shrink-0 opacity-60" />
+                  <span className="font-mono text-[11px] truncate">{call.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Initial waiting state — before the first tool call has been reported */}
+        {!isUser && isSearching && (!toolCalls || toolCalls.length === 0) && (
           <div className="flex items-center gap-2 px-3 py-2 mb-2 rounded-lg bg-accent/5 border border-accent/10 animate-fade-in">
             <Search className="w-3.5 h-3.5 text-accent animate-pulse" />
             <span className="text-xs text-accent font-medium">

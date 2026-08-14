@@ -15,8 +15,9 @@
 - **AST-aware chunking** — Tree-sitter parses Python, JavaScript, TypeScript, Go, Java, Rust, C, and C++ into semantic chunks (functions, classes, blocks)
 - **Intent-aware routing** — a tiered heuristic router skips the agent (and any embedding calls) entirely for conversational messages, cutting unnecessary latency
 - **Streaming everywhere** — clone, indexing, and chat all use Server-Sent Events (SSE) for real-time progress
+- **Live tool activity feed** — chat shows the agent's tool calls (searching, reading files, listing directories) as they happen, not just a static "searching" spinner
 - **Smart conversation titles** — `llama3.2:1b` generates a concise title after the first message; falls back gracefully if the model isn't available
-- **Model switcher** — pick any Ollama model or the configured cloud model per conversation from the chat header
+- **Model switcher** — pick the configured Ollama model or the configured cloud model per conversation from the chat header
 - **Cloud fallback** — [Groq](https://groq.com) via `langchain-groq` when configured; hybrid mode tries Groq first and falls back to Ollama automatically if it fails before streaming starts
 
 ---
@@ -299,11 +300,14 @@ This avoids the round-trip cost of spinning up the agent for conversational mess
 #### Chat SSE event types
 
 ```
+event: tool_call data: { seq, tool, label?, status: "start" | "end" }
 event: sources   data: { sources: [...], search_results_count, token_count }
 event: token     data: { token: "..." }
 event: done      data: { conversation_id, response_time_ms, conversation_title? }
 event: error     data: { message: "..." }
 ```
+
+`tool_call` fires live as the agent's tools (`search_codebase`, `read_file`, `list_files`) start and finish, so the client can render a per-call activity trail instead of a single static "searching" indicator. `seq` identifies the call; `label` (a human-readable description, e.g. `Searching codebase for "..."`) is only sent on `start` — the client keeps it and just updates `status` when the matching `end` arrives.
 
 `sources` is emitted cumulatively: once before the first token (empty if the agent hasn't searched yet), and again whenever a later tool hop turns up code the client hasn't seen. Each event carries the full deduplicated list, so the client just replaces what it's holding.
 

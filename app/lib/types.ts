@@ -72,6 +72,13 @@ export interface SSEMessage {
   data: Record<string, unknown>;
 }
 
+export interface ToolCall {
+  seq: number;
+  tool: "search_codebase" | "read_file" | "list_files";
+  label: string;
+  status: "start" | "end";
+}
+
 export interface ChatModel {
   id: string;
   name: string;

@@ -227,7 +227,10 @@ class LLMService:
 
     async def list_models(self) -> list[dict[str, str]]:
         """
-        List all available chat models from Ollama and cloud.
+        List available chat models — exactly one entry per provider (Groq,
+        Ollama), not every locally pulled Ollama tag. Which Ollama model that
+        one entry points at is controlled by OLLAMA_MODEL in Settings, not
+        picked ad hoc from the chat header.
 
         Returns list of {id, name, provider} dicts.
         """
@@ -242,26 +245,32 @@ class LLMService:
                 "provider": provider_label,
             })
 
-        # Ollama models
+        # Ollama — a single entry for the configured chat model, if it's
+        # actually pulled and reachable.
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{settings.OLLAMA_BASE_URL}/api/tags")
                 if resp.status_code == 200:
-                    for m in resp.json().get("models", []):
-                        name = m.get("name", "")
-                        if not name:
-                            continue
-                        # Skip embedding models
-                        embed_model = settings.OLLAMA_EMBED_MODEL
-                        if name == embed_model or name.startswith(f"{embed_model}:"):
-                            continue
+                    target = settings.OLLAMA_MODEL
+                    target_base = target.split(":")[0]
+                    available = {
+                        m.get("name", "")
+                        for m in resp.json().get("models", [])
+                        # Exclude Ollama's own cloud-proxied models — remote
+                        # execution would silently break the "fully local"
+                        # guarantee if this ever became selectable.
+                        if not m.get("remote_host")
+                    }
+                    if target in available or any(
+                        m.split(":")[0] == target_base for m in available
+                    ):
                         models.append({
-                            "id": f"ollama:{name}",
-                            "name": name,
+                            "id": f"ollama:{target}",
+                            "name": target,
                             "provider": "Ollama",
                         })
         except Exception as e:
-            logger.debug(f"Could not list Ollama models: {e}")
+            logger.debug(f"Could not check Ollama model availability: {e}")
 
         return models
 
@@ -277,6 +286,7 @@ class LLMService:
         return ChatOllama(
             model=model or settings.OLLAMA_MODEL,
             base_url=settings.OLLAMA_BASE_URL,
+            temperature=0.2,
             client_kwargs={"timeout": float(settings.OLLAMA_TIMEOUT)},
         )
 
@@ -291,6 +301,7 @@ class LLMService:
             api_key=settings.CLOUD_API_KEY,
             base_url=_groq_base_url(),
             timeout=float(settings.CLOUD_TIMEOUT),
+            temperature=0.2,
             streaming=True,
         )
 

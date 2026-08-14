@@ -6,7 +6,22 @@ Run the dev server (auto-reload on file changes):
     cd app/backend
     uvicorn main:app --reload --host localhost --port 8000
 """
+import sys
+import asyncio
+
+# On Windows, uvicorn's default ProactorEventLoop (IOCP-based) has known
+# native crashes (access violations) under concurrent overlapped I/O —
+# clone_service.py already routes around it for git's subprocess pipes,
+# but the corruption isn't limited to that call site: it has also shown up
+# in unrelated pure-Python code running later in the same process (see
+# indexing_service._collect_files crashes). The Selector loop doesn't use
+# IOCP at all. This app never uses asyncio subprocess (git runs via a
+# blocking subprocess.Popen in a worker thread), so Selector is safe here.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import shutil
+import faulthandler
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +31,14 @@ import traceback
 
 from config import settings
 from logger import logger
-from models import HealthResponse, ErrorResponse
+from models import HealthResponse, ErrorResponse, ProjectStatus
+
+# Dump a native traceback on hard crashes (segfault/access-violation) that
+# otherwise kill the process with exit code and no diagnostic at all.
+_crash_log_path = settings.DATA_DIR / "logs" / "crash.log"
+_crash_log_path.parent.mkdir(parents=True, exist_ok=True)
+_crash_log_file = open(_crash_log_path, "a", buffering=1)
+faulthandler.enable(file=_crash_log_file)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -113,10 +135,19 @@ async def startup_event():
         logger.info("Database connections initialized")
 
         # Purge orphaned vector tables (left behind by partial deletes or crashes)
-        project_ids = {p.id for p in db.list_projects(limit=9999)}
+        all_projects = db.list_projects(limit=9999)
+        project_ids = {p.id for p in all_projects}
         orphans = vector_db.purge_orphaned_tables(project_ids)
         if orphans:
             logger.info(f"Cleaned up {len(orphans)} orphaned vector table(s)")
+
+        # Recover projects stuck mid-clone/mid-index from a previous run that
+        # crashed or was killed — nothing was left alive to mark them ERROR.
+        stuck = [p for p in all_projects if p.status in (ProjectStatus.CLONING, ProjectStatus.INDEXING)]
+        for p in stuck:
+            db.update_project_error(p.id, f"Interrupted by server restart while {p.status.value}")
+        if stuck:
+            logger.warning(f"Recovered {len(stuck)} project(s) stuck mid-clone/index from a previous crash")
     except Exception as e:
         logger.error(f"Failed to initialize databases: {e}")
         raise
@@ -215,3 +246,8 @@ app.include_router(projects_router, prefix=settings.API_PREFIX, tags=["Projects"
 app.include_router(index_router, prefix=settings.API_PREFIX, tags=["Indexing"])
 app.include_router(chat_router, prefix=settings.API_PREFIX, tags=["Chat"])
 app.include_router(system_router, prefix=settings.API_PREFIX, tags=["System"])
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="localhost", port=8000, reload=settings.DEBUG)
